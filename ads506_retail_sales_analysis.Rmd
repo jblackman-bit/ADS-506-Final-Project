@@ -538,7 +538,13 @@ stl_macro |>
 
 ## Stationarity Diagnostics & Differencing Assessment
 
-To satisfy the Module 4 rubric requirements regarding stationarity and differencing ("Was there a need for differencing?"), we formally conduct unit root and seasonal differencing tests following the Box-Jenkins methodology: 1. **Seasonal Differencing Test (`unitroot_nsdiffs`):** Evaluates whether an annual seasonal difference ($\nabla_{12} y_t = y_t - y_{t-12}$, $D = 1$) is required. 2. **First Differencing Test (`unitroot_ndiffs`):** Applied to the seasonally differenced series to test if a first difference ($\nabla$, $d = 1$) is needed to achieve mean stationarity. 3. **KPSS Unit Root Test (`unitroot_kpss`):** Tests the null hypothesis $H_0$ that the series is stationary ($p \ge 0.05$).
+To satisfy the Module 4 rubric requirements regarding stationarity and differencing ("Was there a need for differencing?"), we formally conduct unit root and seasonal differencing tests following the Box-Jenkins methodology:
+
+1\. **Seasonal Differencing Test (`unitroot_nsdiffs`):** Evaluates whether an annual seasonal difference ($\nabla_{12} y_t = y_t - y_{t-12}$, $D = 1$) is required.
+
+2\. **First Differencing Test (`unitroot_ndiffs`):** Applied to the seasonally differenced series to test if a first difference ($\nabla$, $d = 1$) is needed to achieve mean stationarity.
+
+3\. **KPSS Unit Root Test (`unitroot_kpss`):** Tests the null hypothesis $H_0$ that the series is stationary ($p \ge 0.05$).
 
 ```{r stationarity-differencing-tests, fig.height=8}
 # 1. Seasonal differencing recommendation
@@ -737,7 +743,11 @@ fc_baseline |>
 >
 > **Transformation Guidance for Mia Arnold:**\
 > - **Multiplicative vs. Additive ETS:** Exponential smoothing handles heteroscedasticity (expanding seasonal variance) natively through **multiplicative error and seasonal components** (e.g., $ETS(M,A,M)$ or $ETS(M,A_d,M)$). Per Hyndman & Athanasopoulos (2021, Ch. 8), an ETS model with multiplicative components often removes the need for a prior Box-Cox transformation.\
-> - **Required Comparison:** Mia, please fit and compare **both** approaches against the holdout test set to see which minimizes out-of-sample RMSE: 1. **Multiplicative ETS on Raw Nominal Data:** `ETS(sales_nominal)` (which autoselects multiplicative components $(M,N,M)$, $(M,A,M)$, etc.) 2. **Additive ETS on Box-Cox Transformed Data:** `ETS(box_cox(sales_nominal, lambda))` (restricting components to strictly additive states $(A,A,A)$ to prevent numerical instability, using optimal $\lambda$ from the Guerrero optimization table in Section 3.6). - When using `box_cox(sales_nominal, lambda)` inside `fable::model()`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
+> - **Required Comparison:** Mia, please fit and compare **both** approaches against the holdout test set to see which minimizes out-of-sample RMSE:
+>
+> 1\. **Multiplicative ETS on Raw Nominal Data:** `ETS(sales_nominal)` (which autoselects multiplicative components $(M,N,M)$, $(M,A,M)$, etc.)
+>
+> 2\. **Additive ETS on Box-Cox Transformed Data:** `ETS(box_cox(sales_nominal, lambda))` (restricting components to strictly additive states $(A,A,A)$ to prevent numerical instability, using optimal $\lambda$ from the Guerrero optimization table in Section 3.6). - When using `box_cox(sales_nominal, lambda)` inside `fable::model()`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
 
 ``` r
 # ==============================================================================
@@ -818,7 +828,11 @@ fc_baseline |>
 >
 > **Transformation Guidance for Ramin Fazli:**\
 > - **Variance Stationarity Precedes Mean Stationarity:** Classical Box-Jenkins methodology requires the series to be stationary in both variance and mean. Differencing ($\nabla$ and $\nabla_{12}$) removes trend and stochastic seasonality to stabilize the mean, but **differencing cannot stabilize non-constant variance** (Hyndman & Athanasopoulos, 2021, Ch. 9).\
-> - **Required Transformation for Ramin:** Ramin, please ensure that you apply **Box-Cox** (`box_cox(sales_nominal, lambda)`) or **natural log** (`log(sales_nominal)`) transformation before differencing and fitting ARIMA specifications: 1. Automated search: `ARIMA(box_cox(sales_nominal, lambda))` or `ARIMA(log(sales_nominal))` 2. Manual specifications: `ARIMA(box_cox(sales_nominal, lambda) ~ pdq(p,d,q) + PDQ(P,D,Q))` - **Differencing Order Reminder:** Recall from our Section 4.8 stationarity diagnostics that Building Materials, Clothing, and Macro Retail Total achieve stationarity with a single seasonal difference ($D=1, d=0$), while Health & Personal Care requires both seasonal and first differencing ($D=1, d=1$).\
+> - **Required Transformation for Ramin:** Ramin, please ensure that you apply **Box-Cox** (`box_cox(sales_nominal, lambda)`) or **natural log** (`log(sales_nominal)`) transformation before differencing and fitting ARIMA specifications:
+>
+> 1\. Automated search: `ARIMA(box_cox(sales_nominal, lambda))` or `ARIMA(log(sales_nominal))`
+>
+> 2\. Manual specifications: `ARIMA(box_cox(sales_nominal, lambda) ~ pdq(p,d,q) + PDQ(P,D,Q))` - **Differencing Order Reminder:** Recall from our Section 4.8 stationarity diagnostics that Building Materials, Clothing, and Macro Retail Total achieve stationarity with a single seasonal difference ($D=1, d=0$), while Health & Personal Care requires both seasonal and first differencing ($D=1, d=1$).\
 > - In `fable`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
 
 ``` r

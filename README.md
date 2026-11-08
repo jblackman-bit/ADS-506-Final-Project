@@ -1,7 +1,3 @@
-------------------------------------------------------------------------
-
-editor_options: markdown: wrap: sentence ---
-
 # 🛍️ ADS 506 Final Team Project: Forecasting U.S. Retail Sales Across Sectors
 
 > **Course:** ADS 506 – Applied Time Series Analysis\
@@ -156,4 +152,8 @@ Or from the command line:
 Rscript -e "shiny::runApp('app.R', port = 8080)"
 ```
 
-Features available in the Shiny Dashboard: \* Switch between **Macro Retail Composite** and individual verticals (Health, Clothing, Building). \* Toggle between **Nominal Dollar Sales** and **Real (Inflation-Adjusted) Sales**. \* Inspect **STL Decomposition**, **Seasonal Profiles**, and **Subseries Plots**. \* Generate **Baseline Point Forecasts and 80%/95% Prediction Intervals** for up to 24 months forward.
+Features available in the Shiny Dashboard:
+\* Switch between **Macro Retail Composite** and individual verticals (Health, Clothing, Building).
+\* Toggle between **Nominal Dollar Sales** and **Real (Inflation-Adjusted) Sales**.
+\* Inspect **STL Decomposition**, **Seasonal Profiles**, and **Subseries Plots**.
+\* Generate **Baseline Point Forecasts and 80%/95% Prediction Intervals** for up to 24 months forward.

@@ -1,0 +1,24 @@
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+.RDataTmp
+
+# User-specific files
+.Ruserdata
+
+# Default non-interactive plot output
+Rplots.pdf
+
+# Example: exclude giant generated html if preferred, but can keep if wanted
+# ads506_retail_sales_analysis.html
+
+# RStudio files
+.Rproj.user/
+
+# macOS files
+.DS_Store
+.AppleDouble
+.LSOverride

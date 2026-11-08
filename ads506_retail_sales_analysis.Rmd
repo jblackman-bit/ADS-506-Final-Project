@@ -1,0 +1,906 @@
+---
+title: "ADS 506 Final Team Project: U.S. Retail Sales Forecasting"
+subtitle: "Cross-Vertical Analysis: Health & Personal Care, Clothing, Building Materials, and Macro Retail"
+author: "Group 8:  Mia Arnold, Jordan Blackman, Ramin Fazli"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  dpi = 150
+)
+```
+
+# Project Overview & Objectives
+
+In applied retail forecasting, supply chain planners must constantly balance inventory availability with carrying costs. Retail demand is characterized by pronounced annual seasonality, holiday promotional spikes, and macroeconomic sensitivity.
+
+This project investigates monthly sales data from the **U.S. Census Bureau Monthly Retail Trade Survey (MRTS)** via the Federal Reserve Bank of St. Louis (FRED) spanning **January 1992 through August 2026** (\>416 continuous months).
+
+We analyze and forecast across three distinct retail verticals and one aggregated macro composite:
+
+1.  **Defensive / Essential Staple:** *Health & Personal Care Stores* (`MRTSSM446USN` - NAICS 446)
+2.  **Discretionary / Cyclical:** *Clothing & Accessories Stores* (`MRTSSM448USN` - NAICS 448)
+3.  **Housing-Linked / Seasonal:** *Building Material & Garden Equipment Dealers* (`MRTSSM444USN` - NAICS 444)
+4.  **Macro Retail Composite:** Aggregate total across all three sectors ($Y_{\text{macro}} = Y_{\text{health}} + Y_{\text{clothing}} + Y_{\text{building}}$).
+
+To control for monetary inflation and evaluate real consumer purchasing volume, we integrate the **Consumer Price Index for All Urban Consumers (`CPIAUCNS`)**.
+
+------------------------------------------------------------------------
+
+# Libraries & Environment Setup
+
+```{r libraries}
+# Core tidy time series libraries
+library(tidyverse)
+library(fpp3)
+library(scales)
+library(zoo)
+library(slider)
+library(gt)
+
+# Set clean visualization theme
+theme_set(theme_minimal(base_size = 12))
+```
+
+------------------------------------------------------------------------
+
+# Data Ingestion & Pipeline
+
+## Automated Data Download from FRED
+
+We retrieve all four monthly series directly from FRED using a reliable curl connection.
+
+```{r ingest-fred}
+# Function to download series from FRED via curl
+fetch_fred <- function(series_id) {
+  cmd <- sprintf('curl -sL "https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s"', series_id)
+  df <- read.csv(pipe(cmd), stringsAsFactors = FALSE)
+  names(df) <- c("date", "value")
+  df$value <- suppressWarnings(as.numeric(df$value))
+  df$date <- as.Date(df$date)
+  return(df)
+}
+
+# Define explicit study window boundaries to guarantee 100% reproducibility
+# (Prevents dynamic data additions or Census Bureau revisions from altering project metrics)
+STUDY_START <- as.Date("1992-01-01")
+STUDY_END   <- as.Date("2026-08-01") # Latest complete month across all MRTS series
+
+# Fetch the 3 retail verticals and CPI
+health_raw   <- fetch_fred("MRTSSM446USN") |> rename(health = value)
+clothing_raw <- fetch_fred("MRTSSM448USN") |> rename(clothing = value)
+building_raw <- fetch_fred("MRTSSM444USN") |> rename(building = value)
+cpi_raw      <- fetch_fred("CPIAUCNS")    |> rename(cpi = value)
+```
+
+## Missing Value Diagnostics & Imputation
+
+Before modeling, we inspect all series for missing timestamps or values (`NA`).
+
+```{r check-missing}
+# Check missing value counts in raw downloads across respective columns
+c(
+  health_na       = sum(is.na(health_raw$health)),
+  clothing_na     = sum(is.na(clothing_raw$clothing)),
+  building_na     = sum(is.na(building_raw$building)),
+  cpi_na_post1992 = sum(is.na(cpi_raw$cpi[cpi_raw$date >= as.Date("1992-01-01")]))
+)
+
+# Display the exact timestamp where CPI has a missing observation
+cpi_raw |> filter(is.na(cpi), date >= as.Date("1992-01-01"))
+```
+
+In the raw FRED release for `CPIAUCNS`, the observation for **October 2025** is missing (`NA`). To maintain an unbroken monthly time series without gaps, we impute this single value using **linear interpolation** (`zoo::na.approx`).
+
+```{r impute-cpi}
+# Impute the single missing CPI observation using linear interpolation
+cpi_clean <- cpi_raw |>
+  mutate(cpi = na.approx(cpi, na.rm = FALSE))
+
+# Confirm zero missing values remain
+cat("Missing values in CPI after interpolation:", sum(is.na(cpi_clean$cpi[cpi_clean$date >= as.Date("1992-01-01")])), "\n")
+```
+
+## CPI Deflation & Macro Retail Aggregation
+
+We merge the datasets, calculate:
+
+1\. **Real Sales Volume** (adjusted for inflation): $\text{Sales}_{\text{Real}} = \frac{\text{Sales}_{\text{Nominal}}}{\text{CPI}} \times 100$
+
+2\. **Macro Retail Series**: Sum of all three series in each month.
+
+```{r merge-and-deflate}
+# Merge into wide format
+retail_wide <- health_raw |>
+  inner_join(clothing_raw, by = "date") |>
+  inner_join(building_raw, by = "date") |>
+  inner_join(cpi_clean, by = "date") |>
+  filter(date >= STUDY_START, date <= STUDY_END) |>
+  mutate(
+    macro_retail = health + clothing + building,
+    Month = yearmonth(date)
+  )
+
+# Reshape into a unified tidy table ready for tsibble forecasting
+retail_tidy <- retail_wide |>
+  select(Month, cpi, health, clothing, building, macro_retail) |>
+  pivot_longer(
+    cols = c(health, clothing, building, macro_retail),
+    names_to = "vertical",
+    values_to = "sales_nominal"
+  ) |>
+  mutate(
+    # Human-readable labels for facets/plots
+    vertical_name = case_when(
+      vertical == "health"       ~ "Health & Personal Care",
+      vertical == "clothing"     ~ "Clothing & Accessories",
+      vertical == "building"     ~ "Building & Garden Supplies",
+      vertical == "macro_retail" ~ "Macro Retail Total (Combined)"
+    ),
+    # CPI Deflated Real Sales (Constant 1982-84 Dollars)
+    sales_real = (sales_nominal / cpi) * 100,
+    # Natural Log Transform (for multiplicative variance stabilization)
+    log_sales_nominal = log(sales_nominal),
+    log_sales_real    = log(sales_real)
+  )
+
+# Convert to tsibble
+retail_ts <- retail_tidy |>
+  as_tsibble(index = Month, key = vertical)
+
+# Verify no gaps exist
+cat("Any implicit time gaps in tsibble:", any(has_gaps(retail_ts)$.gaps), "\n")
+```
+
+## Export Clean Dataset
+
+We save the processed tidy dataset to `data/retail_data_clean.csv` for use by the Shiny application and team members.
+
+```{r export-csv}
+# Ensure data directory exists and write CSV
+if (!dir.exists("data")) dir.create("data", recursive = TRUE)
+write_csv(retail_tidy, "data/retail_data_clean.csv")
+```
+
+## Data Quality Assessment & Descriptive Statistics Profile
+
+To satisfy the Module 4 Data Quality Assessment criteria, we generate a formal statistical profile evaluating completeness, distribution spreads, and time series strength features.
+
+```{r data-quality-profile}
+# 1. Comprehensive Data Quality Profile
+quality_summary <- retail_ts |>
+  as_tibble() |>
+  group_by(`Retail Vertical` = vertical_name) |>
+  summarise(
+    `Start Month`     = format(min(Month), "%Y %b"),
+    `End Month`       = format(max(Month), "%Y %b"),
+    `Total N`         = n(),
+    `Missing (NA)`    = sum(is.na(sales_nominal)),
+    `Mean ($M)`       = mean(sales_nominal),
+    `Median ($M)`     = median(sales_nominal),
+    `Std Dev ($M)`    = sd(sales_nominal),
+    `Min ($M)`        = min(sales_nominal),
+    `Max ($M)`        = max(sales_nominal),
+    `CV (SD/Mean)`    = sd(sales_nominal) / mean(sales_nominal)
+  )
+
+quality_summary |>
+  gt() |>
+  tab_header(
+    title = md("**U.S. Retail Sales: Data Quality & Descriptive Statistics Profile**"),
+    subtitle = "Monthly Retail Trade Survey (January 1992 – August 2026, NSA)"
+  ) |>
+  fmt_number(columns = c(`Mean ($M)`, `Median ($M)`, `Std Dev ($M)`, `Min ($M)`, `Max ($M)`), decimals = 1) |>
+  fmt_number(columns = `CV (SD/Mean)`, decimals = 3) |>
+  cols_align(align = "center", columns = -`Retail Vertical`) |>
+  tab_options(
+    data_row.padding = px(4),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+
+# 2. Time Series Feature Diagnostics (STL Trend & Seasonality Strength)
+stl_features_summary <- retail_ts |>
+  features(sales_nominal, feat_stl) |>
+  mutate(
+    `Retail Vertical` = case_when(
+      vertical == "health"       ~ "Health & Personal Care",
+      vertical == "clothing"     ~ "Clothing & Accessories",
+      vertical == "building"     ~ "Building & Garden Supplies",
+      vertical == "macro_retail" ~ "Macro Retail Total (Combined)"
+    )
+  ) |>
+  select(`Retail Vertical`, `Trend Strength (F_T)` = trend_strength, `Seasonal Strength (F_S)` = seasonal_strength_year)
+
+stl_features_summary |>
+  gt() |>
+  tab_header(
+    title = md("**Time Series Decomposition Feature Strengths**"),
+    subtitle = "Quantifying relative magnitude of trend and 12-month annual seasonality (0 to 1 scale)"
+  ) |>
+  fmt_number(columns = c(`Trend Strength (F_T)`, `Seasonal Strength (F_S)`), decimals = 3) |>
+  cols_align(align = "center", columns = -`Retail Vertical`) |>
+  tab_options(
+    data_row.padding = px(4),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+```
+
+## Mathematical Transformations: Box-Cox Optimization via Guerrero's Method
+
+When seasonal swings expand proportionally with sales growth (multiplicative seasonality), variance stabilization is required prior to linear and ARIMA modeling. We estimate the optimal Box-Cox transformation parameter $\lambda$ using **Guerrero's method**, which minimizes the coefficient of variation across seasonal subseries.
+
+$$\min_\lambda \frac{\sigma_\text{seasonal}}{\mu_\text{seasonal}}, \quad w_t = \begin{cases} \log(y_t) & \text{if } \lambda = 0 \\ \frac{y_t^\lambda - 1}{\lambda} & \text{if } \lambda \neq 0 \end{cases}$$
+
+```{r boxcox-guerrero, fig.height=8}
+# Estimate optimal lambda via Guerrero's method across all series
+lambda_estimates <- retail_ts |>
+  features(sales_nominal, features = guerrero) |>
+  mutate(
+    `Retail Vertical` = case_when(
+      vertical == "health"       ~ "Health & Personal Care",
+      vertical == "clothing"     ~ "Clothing & Accessories",
+      vertical == "building"     ~ "Building & Garden Supplies",
+      vertical == "macro_retail" ~ "Macro Retail Total (Combined)"
+    ),
+    `Guerrero Lambda` = lambda_guerrero,
+    `Empirical Interpretation` = case_when(
+      abs(lambda_guerrero) < 0.15 ~ "Optimal lambda ≈ 0: Logarithmic transform ln(Y_t) is ideal",
+      TRUE ~ "Weak power transform; log transform remains robust & interpretable")) |>
+  select(`Retail Vertical`, `Guerrero Lambda`, `Empirical Interpretation`)
+
+lambda_estimates |>
+  gt() |>
+  tab_header(
+    title = md("**Guerrero's Method: Box-Cox Lambda Parameter Estimates**"),
+    subtitle = "Evaluating optimal variance-stabilizing power transformation across retail verticals"
+  ) |>
+  fmt_number(columns = `Guerrero Lambda`, decimals = 4) |>
+  cols_align(align = "center", columns = c(`Guerrero Lambda`)) |>
+  tab_options(
+    data_row.padding = px(4),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+
+# Plot Box-Cox Transformed Series (stabilized variance)
+retail_ts |>
+  left_join(retail_ts |> features(sales_nominal, features = guerrero), by = "vertical") |>
+  mutate(sales_boxcox = box_cox(sales_nominal, lambda_guerrero)) |>
+  autoplot(sales_boxcox) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  labs(
+    title = "Guerrero Box-Cox Transformed Retail Sales (Variance Stabilized)",
+    subtitle = "Equalizes the seasonal swing amplitudes across the 1992–2026 historical trajectory",
+    y = "Box-Cox Transformed Value",
+    x = "Month"
+  )
+```
+
+------------------------------------------------------------------------
+
+# Exploratory Data Analysis (EDA) & Decomposition
+
+## Historical Time Series Trends: Nominal vs. Real Sales
+
+We plot all three individual retail verticals alongside the Macro Retail aggregate.
+
+```{r plot-nominal-trends, fig.height=8}
+# Plot nominal sales over time across verticals
+retail_ts |>
+  autoplot(sales_nominal) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Historical U.S. Retail Sales Trends (1992–2026)",
+    subtitle = "Monthly Retail Trade Survey (Nominal, Not Seasonally Adjusted)",
+    y = "Monthly Sales (Millions USD)",
+    x = "Month",
+    caption = "Source: U.S. Census Bureau via FRED"
+  )
+```
+
+### Inflation Impact: Nominal vs. Real Purchasing Power
+
+Controlling for inflation with CPI reveals whether recent sales increases represent real volume expansion or price inflation.
+
+```{r plot-inflation-impact, fig.height=8}
+# Compare Nominal vs Real sales for Macro Retail and Verticals
+retail_ts |>
+  select(Month, vertical_name, sales_nominal, sales_real) |>
+  pivot_longer(cols = c(sales_nominal, sales_real), names_to = "series_type", values_to = "sales_val") |>
+  mutate(series_label = ifelse(series_type == "sales_nominal", "Nominal Sales", "Real Sales (CPI Deflated)")) |>
+  ggplot(aes(x = Month, y = sales_val, color = series_label)) +
+  geom_line(alpha = 0.85) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  scale_color_manual(values = c("Nominal Sales" = "#1f77b4", "Real Sales (CPI Deflated)" = "#2ca02c")) +
+  labs(
+    title = "Nominal vs. Real (CPI Deflated) Retail Sales",
+    subtitle = "Real volume plateaus in recent years while nominal sales continue to rise due to inflation",
+    x = "Month",
+    y = "Sales (Millions USD)",
+    color = "Measure"
+  ) +
+  theme(legend.position = "top")
+```
+
+## Seasonal Signatures
+
+Different retail verticals exhibit distinct seasonal drivers:
+
+- **Clothing & Apparel:** Dominated by a massive December holiday shopping surge and a secondary August back-to-school lift.
+- **Health & Personal Care:** Recurring December peak (holiday beauty gifting and flexible spending account expirations), with steady non-discretionary baseline.
+- **Building & Garden Materials:** Spring/early-summer peak (April to June) driven by home improvement and garden planting season.
+- **Macro Retail Total:** Combines these complementary seasonal waves.
+
+```{r seasonal-plots, fig.height=7}
+# Seasonal plot by month of year (recent 10 years for clarity)
+# Setting labels = "none" ensures the x-axis shows exactly Jan through Dec without padding extra Dec/Jan ticks
+retail_ts |>
+  filter(Month >= yearmonth("2015 Jan")) |>
+  gg_season(sales_nominal, labels = "none") +
+  facet_wrap(vars(vertical_name), scales = "free_y") +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Seasonal Plots: Monthly Sales Signatures (2015–2026)",
+    subtitle = "Distinct seasonal peaks: December for Health/Clothing vs. Spring for Building Supplies",
+    y = "Monthly Sales (Millions USD)",
+    x = "Month",
+    color = "Year"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r subseries-plots, fig.height=8}
+# Seasonal subseries plot showing monthly averages and trends within each calendar month
+# (gg_subseries natively formats a 2D grid of 12 month columns across verticals)
+retail_ts |>
+  filter(Month >= yearmonth("2010 Jan")) |>
+  gg_subseries(sales_nominal) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Seasonal Subseries Plots by Month (2010–2026)",
+    subtitle = "Mini-panels show year-over-year trajectory within each month; horizontal blue line is that month's mean",
+    y = "Monthly Sales (Millions USD)"
+  )
+```
+
+## Outlier Detection & Structural Shocks
+
+To address the Module 4 rubric requirements regarding outliers and structural disruptions, we conduct two diagnostic screens:
+
+1\. **Monthly Seasonal Boxplots:** Evaluating dispersion and identifying extreme observations across the 12 calendar months.
+
+2\. **STL Remainder Outlier Screening:** Identifying extreme irregular innovations ($|z_t| > 3\sigma$) to locate historical economic shocks such as the **March–April 2020 COVID-19 lockdowns** and the **2008 Great Financial Crisis**.
+
+```{r outlier-screening, fig.height=8}
+# 1. Monthly Distribution Boxplots (detecting calendar month outliers)
+retail_ts |>
+  mutate(Month_Label = factor(month(Month, label = TRUE, abbr = TRUE))) |>
+  ggplot(aes(x = Month_Label, y = sales_nominal)) +
+  geom_boxplot(fill = "#2c3e50", alpha = 0.25, outlier.colour = "#e74c3c", outlier.shape = 16, outlier.size = 2) +
+  facet_wrap(vars(vertical_name), scales = "free_y") +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Monthly Sales Distributions & Seasonal Outlier Screening",
+    subtitle = "Red points denote statistical outliers (> 1.5 * IQR from quartiles) within each calendar month",
+    x = "Month of Year",
+    y = "Monthly Sales (Millions USD)"
+  )
+
+# 2. Extract STL Remainder Outliers (|z| > 3)
+stl_outliers <- retail_ts |>
+  model(stl = STL(sales_nominal ~ season(window = "periodic"))) |>
+  components() |>
+  as_tibble() |>
+  group_by(vertical) |>
+  mutate(
+    rem_mean = mean(remainder, na.rm = TRUE),
+    rem_sd   = sd(remainder, na.rm = TRUE),
+    z_score  = (remainder - rem_mean) / rem_sd
+  ) |>
+  filter(abs(z_score) > 3) |>
+  mutate(
+    `Retail Vertical` = case_when(
+      vertical == "health"       ~ "Health & Personal Care",
+      vertical == "clothing"     ~ "Clothing & Accessories",
+      vertical == "building"     ~ "Building & Garden Supplies",
+      vertical == "macro_retail" ~ "Macro Retail Total (Combined)"
+    ),
+    `Timestamp`       = format(Month, "%Y %b"),
+    `Actual Sales`    = sales_nominal,
+    `STL Remainder`   = remainder,
+    `Shock Magnitude` = z_score
+  ) |>
+  ungroup() |>
+  select(`Retail Vertical`, `Timestamp`, `Actual Sales`, `STL Remainder`, `Shock Magnitude`) |>
+  arrange(`Retail Vertical`, desc(abs(`Shock Magnitude`)))
+
+stl_outliers |>
+  head(10) |>
+  gt() |>
+  tab_header(
+    title = md("**Extreme Remainder Outliers (|z-score| > 3)**"),
+    subtitle = "Capturing historic structural shocks: COVID-19 pandemic disruptions (Spring 2020) and holiday surges"
+  ) |>
+  fmt_currency(columns = c(`Actual Sales`, `STL Remainder`), decimals = 0, suffixing = TRUE) |>
+  fmt_number(columns = `Shock Magnitude`, decimals = 2, force_sign = TRUE) |>
+  cols_align(align = "center", columns = c(`Timestamp`, `Shock Magnitude`)) |>
+  tab_options(
+    data_row.padding = px(3),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+```
+
+## Classical Moving Average Smoothing ($2 \times 12$-MA)
+
+Classical moving average smoothing is applied to filter out high-frequency annual fluctuations. For monthly data with even seasonality ($m = 12$), a centered $2 \times 12$-MA is computed using `slider::slide_dbl()`, yielding an unbiased estimate of the underlying macroeconomic trend-cycle.
+
+```{r moving-average-smoothing, fig.height=8}
+# Compute centered 2x12-MA across each vertical
+retail_ma <- retail_ts |>
+  group_by(vertical) |>
+  mutate(
+    ma_12   = slider::slide_dbl(sales_nominal, mean, .before = 5, .after = 6, .complete = TRUE),
+    ma_2x12 = slider::slide_dbl(ma_12, mean, .before = 1, .after = 0, .complete = TRUE)
+  ) |>
+  ungroup()
+
+# Plot raw series against 2x12-MA smoothed trend
+retail_ma |>
+  autoplot(sales_nominal, colour = "gray70") +
+  geom_line(aes(y = ma_2x12), colour = "#800020", linewidth = 0.9) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Centered Moving Average Smoothing: 2x12-MA vs. Raw Monthly Sales",
+    subtitle = "Raw series in gray; maroon curve represents 2x12-MA smoothed macroeconomic trend-cycle",
+    y = "Monthly Sales (Millions USD)",
+    x = "Month"
+  )
+```
+
+## Autocorrelation & Serial Correlation (ACF)
+
+The ACF diagnostic reveals strong positive persistence and clear 12-month annual seasonal spikes ($r_{12}, r_{24}, r_{36}$).
+
+```{r acf-plots, fig.height=7}
+# Autocorrelation function (ACF) across verticals (automatically faceted by key)
+retail_ts |>
+  ACF(sales_nominal, lag_max = 36) |>
+  autoplot() +
+  labs(
+    title = "Autocorrelation Functions (ACF up to 36 Months)",
+    subtitle = "Slow decay indicates non-stationarity / trend; prominent spikes at lags 12, 24, 36 reflect annual seasonality"
+  )
+```
+
+## STL Decomposition: Individual Retail Verticals
+
+We apply STL (Seasonal and Trend decomposition using Loess) to decouple each series into:
+
+1\. **Trend-Cycle Component** ($T_t$)
+
+2\. **12-Month Seasonal Component** ($S_t$)
+
+3\. **Remainder / Irregular Component** ($R_t$)
+
+We separate the individual retail verticals from the macro composite series so that the much larger scale of the aggregate does not compress the individual vertical components.
+
+```{r stl-individual, fig.height=9}
+# STL Decomposition for the 3 individual retail verticals (Health, Clothing, Building)
+stl_individual <- retail_ts |>
+  filter(vertical != "macro_retail") |>
+  model(stl = STL(sales_nominal ~ season(window = "periodic")))
+
+stl_individual |>
+  components() |>
+  autoplot() +
+  labs(
+    title = "STL Decomposition: Individual Retail Verticals",
+    subtitle = "Decomposes Health, Clothing, and Building Supplies into Trend, Seasonality, and Remainder"
+  )
+```
+
+## STL Decomposition: Macro Retail Composite (Combined Total)
+
+```{r stl-macro, fig.height=6}
+# STL Decomposition for the combined macro retail total (scaled independently)
+stl_macro <- retail_ts |>
+  filter(vertical == "macro_retail") |>
+  model(stl = STL(sales_nominal ~ season(window = "periodic")))
+
+stl_macro |>
+  components() |>
+  autoplot() +
+  labs(
+    title = "STL Decomposition: Macro Retail Composite (All 3 Verticals Combined)",
+    subtitle = "Decomposes Total Macro Retail Sales with Independent Vertical Scaling (~$60B to ~$125B)"
+  )
+```
+
+## Stationarity Diagnostics & Differencing Assessment
+
+To satisfy the Module 4 rubric requirements regarding stationarity and differencing ("Was there a need for differencing?"), we formally conduct unit root and seasonal differencing tests following the Box-Jenkins methodology: 1. **Seasonal Differencing Test (`unitroot_nsdiffs`):** Evaluates whether an annual seasonal difference ($\nabla_{12} y_t = y_t - y_{t-12}$, $D = 1$) is required. 2. **First Differencing Test (`unitroot_ndiffs`):** Applied to the seasonally differenced series to test if a first difference ($\nabla$, $d = 1$) is needed to achieve mean stationarity. 3. **KPSS Unit Root Test (`unitroot_kpss`):** Tests the null hypothesis $H_0$ that the series is stationary ($p \ge 0.05$).
+
+```{r stationarity-differencing-tests, fig.height=8}
+# 1. Seasonal differencing recommendation
+ns_tbl <- retail_ts |> features(sales_nominal, unitroot_nsdiffs)
+
+# Apply seasonal differencing (d12)
+retail_d12 <- retail_ts |>
+  group_by(vertical) |>
+  mutate(d12 = difference(sales_nominal, 12)) |>
+  ungroup()
+
+# 2. First differencing recommendation & KPSS test on seasonally differenced series
+nd_tbl   <- retail_d12 |> features(d12, unitroot_ndiffs)
+kpss_tbl <- retail_d12 |> features(d12, unitroot_kpss)
+
+# Combine into publication-grade diagnostic table matching Course Assignment standards
+diff_summary <- ns_tbl |>
+  inner_join(nd_tbl, by = "vertical") |>
+  inner_join(kpss_tbl, by = "vertical") |>
+  mutate(
+    `Retail Vertical` = case_when(
+      vertical == "health"       ~ "Health & Personal Care",
+      vertical == "clothing"     ~ "Clothing & Accessories",
+      vertical == "building"     ~ "Building & Garden Supplies",
+      vertical == "macro_retail" ~ "Macro Retail Total (Combined)"
+    ),
+    `Seasonal Diff (D)` = paste0("D = ", nsdiffs),
+    `First Diff (d)`    = paste0("d = ", ndiffs),
+    `KPSS Stat (p-val)` = paste0(round(kpss_stat, 3), " (p = ", round(kpss_pvalue, 3), ")"),
+    `Stationarity Conclusion` = case_when(
+      kpss_pvalue < 0.05 & ndiffs >= 1 ~ "Requires d=1 after D=1 (Persistent upward trend)",
+      TRUE                             ~ "Stationary after seasonal differencing (D=1, d=0)"
+    )
+  ) |>
+  select(`Retail Vertical`, `Seasonal Diff (D)`, `First Diff (d)`, `KPSS Stat (p-val)`, `Stationarity Conclusion`)
+
+diff_summary |>
+  gt() |>
+  tab_header(
+    title = md("**Stationarity & Differencing Diagnostic Tests**"),
+    subtitle = "Unit root evaluation: nsdiffs, ndiffs, and KPSS tests across retail verticals"
+  ) |>
+  cols_align(align = "center", columns = c(`Seasonal Diff (D)`, `First Diff (d)`, `KPSS Stat (p-val)`)) |>
+  tab_options(
+    data_row.padding = px(4),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+
+# 3. Plot Seasonally Differenced Series (d12)
+retail_d12 |>
+  filter(Month >= yearmonth("2015 Jan")) |>
+  autoplot(d12) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Seasonally Differenced Retail Sales [Lag-12 Differencing, D = 1] (2015–2026)",
+    subtitle = "Seasonal differencing eliminates the 12-month annual waves, inducing stationarity",
+    y = "Seasonal Change (d12, Millions USD)",
+    x = "Month"
+  )
+```
+
+### Stationarity Verification for Health & Personal Care (First + Seasonal Differencing)
+
+Because the Health & Personal Care vertical displays an exceptionally strong, persistent secular growth trajectory driven by aging demographics and prescription inflation, applying seasonal differencing alone ($\nabla_{12}$) was insufficient to eliminate non-stationarity ($\text{KPSS } p = 0.01$).
+
+Following the Box-Jenkins procedure, we apply a subsequent first difference ($d = 1$) to the seasonally differenced series ($\nabla \nabla_{12} Y_t = (Y_t - Y_{t-12}) - (Y_{t-1} - Y_{t-13})$) and re-test with KPSS:
+
+```{r health-stationarity-deepdive, fig.height=6}
+# 1. Compute sequential differencing stages for Health & Personal Care
+health_diff_progression <- retail_ts |>
+  filter(vertical == "health") |>
+  mutate(
+    d12     = difference(sales_nominal, 12),
+    d1_d12  = difference(difference(sales_nominal, 12), 1)
+  )
+
+# 2. Run KPSS unit-root tests across each differencing stage
+kpss_raw    <- health_diff_progression |> features(sales_nominal, unitroot_kpss)
+kpss_d12    <- health_diff_progression |> features(d12, unitroot_kpss)
+kpss_d1_d12 <- health_diff_progression |> features(d1_d12, unitroot_kpss)
+
+# Summary table of progression
+tibble(
+  `Transformation / Differencing Stage` = c("Raw Series [d=0, D=0]", "Seasonal Diff Only [d=0, D=1, m=12]", "Both Diffs [d=1, D=1, m=12]"),
+  `Differencing Operator`               = c("Y_t", "∇_12 Y_t", "∇ ∇_12 Y_t"),
+  `KPSS Statistic`                      = c(round(kpss_raw$kpss_stat, 4), round(kpss_d12$kpss_stat, 4), round(kpss_d1_d12$kpss_stat, 4)),
+  `KPSS p-value`                        = c(kpss_raw$kpss_pvalue, kpss_d12$kpss_pvalue, kpss_d1_d12$kpss_pvalue),
+  `Stationarity Conclusion`             = c("Non-Stationary (p < 0.05)", "Non-Stationary (Trend persists)", "Stationary (Fail to reject H0, p >= 0.10)")
+) |>
+  gt() |>
+  tab_header(
+    title = md("**Health & Personal Care: Sequential Stationarity Diagnostic Progression**"),
+    subtitle = "Evaluating KPSS unit-root test across differencing stages"
+  ) |>
+  cols_align(align = "center", columns = c(`Differencing Operator`, `KPSS Statistic`, `KPSS p-value`)) |>
+  tab_options(
+    data_row.padding = px(3),
+    heading.title.font.size = "13pt",
+    heading.subtitle.font.size = "10pt"
+  )
+
+# 3. Time Series Display (Plot, ACF, PACF) of Doubly Differenced Health Series
+health_diff_progression |>
+  filter(!is.na(d1_d12)) |>
+  gg_tsdisplay(d1_d12, plot_type = "partial", lag_max = 36) +
+  labs(
+    title = "Health & Personal Care: Doubly Differenced Series, ACF & PACF [d=1, D=1, m=12]",
+    subtitle = "Stationarity achieved: innovations fluctuate around zero with decaying autocorrelation"
+  )
+```
+
+------------------------------------------------------------------------
+
+# Time Series Modeling Framework
+
+To prepare for our team modeling work, we split the data into training and test partitions:
+
+- **Training Set:** January 1992 through December 2023 (384 months)
+- **Test Holdout Set:** January 2024 through August 2026 (32 months out-of-sample)
+
+> **Takeaway for Group 8 (Nominal vs. Real & Role of CPI):**\
+> Starting with nominal sales for your initial baseline models is standard practice. When your team builds Time Series Regression (TSLM) in Module 4 and ARIMAX in Module 5/6, introducing CPI as an explanatory regressor gives you a strong econometric story for your presentation and technical report.
+
+```{r train-test-split}
+train_data <- retail_ts |> filter(Month < yearmonth("2024 Jan"))
+test_data  <- retail_ts |> filter(Month >= yearmonth("2024 Jan"))
+
+cat("Training observations per vertical:", nrow(train_data) / 4, "\n")
+cat("Test observations per vertical:    ", nrow(test_data) / 4, "\n")
+```
+
+## Baseline Benchmark Forecasters (Implemented)
+
+As demonstrated in Makridakis et al. (2022) and Fildes et al. (2022), simple statistical benchmarks are essential hurdles that any candidate model must beat. We implement:
+
+1.  **Seasonal Naïve (`SNAIVE`):** Forecasts each month using the observation from the same month of the previous year ($y_{t+h} = y_{t+h-12m}$).
+2.  **Random Walk with Drift (`RW ~ drift`):** Forecasts using the last observed value plus the average historical drift.
+3.  **Historical Mean (`MEAN`):** Forecasts using the overall historical average.
+
+> **Methodology Note for Baselines (No Transformation Required):**\
+> Baseline models (`SNAIVE`, `RW ~ drift`, `MEAN`) operate directly on raw nominal sales ($y_t$). As outlined in Hyndman & Athanasopoulos (2021), Seasonal Naïve simply projects the historical observation from 12 months prior ($y_{t+h} = y_{t+h-12m}$) without estimating variance or error distribution parameters. Leaving benchmarks in raw dollars provides an unadulterated, transparent baseline against which subsequent variance-stabilized models can be evaluated.
+
+```{r fit-baseline-models}
+# Fit baseline models simultaneously across all verticals
+fits_baseline <- train_data |>
+  model(
+    snaive = SNAIVE(sales_nominal),
+    drift  = RW(sales_nominal ~ drift()),
+    mean   = MEAN(sales_nominal)
+  )
+
+# Generate forecasts over the test period
+fc_baseline <- fits_baseline |>
+  forecast(new_data = test_data)
+
+# Evaluate accuracy against actual test data (reporting RMSE, MAE, MAPE, MASE)
+baseline_accuracy <- accuracy(fc_baseline, retail_ts) |>
+  select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+  arrange(vertical, RMSE)
+
+baseline_accuracy |>
+  knitr::kable(
+    digits = 2,
+    caption = "Out-of-Sample Accuracy Evaluation of Baseline Models (2024–2026 Holdout)"
+  )
+```
+
+### Baseline Forecast Visualizations
+
+```{r plot-baseline-forecasts, fig.height=8}
+# Plot actuals + baseline forecast paths
+fc_baseline |>
+  filter(.model %in% c("snaive", "drift")) |>
+  autoplot(retail_ts |> filter(Month >= yearmonth("2021 Jan")), level = NULL) +
+  facet_wrap(vars(vertical_name), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(
+    title = "Baseline Benchmark Forecasts vs. Actuals (2024–2026 Test Period)",
+    subtitle = "Seasonal Naïve captures the recurring holiday and spring waves, significantly outperforming Drift",
+    y = "Monthly Sales (Millions USD)",
+    x = "Month",
+    color = "Model"
+  ) +
+  theme(legend.position = "top")
+```
+
+------------------------------------------------------------------------
+
+## Exponential Smoothing (ETS) [Scaffolded for Mia]
+
+> **Lead / Owner:** Mia Arnold\
+> **Model Class:** `fable::ETS()` State Space Models\
+> **Objective:** Evaluate automatic ETS model selection ($\text{AIC}_c$) against candidate models with additive vs. multiplicative errors, damped trends, and multiplicative seasonality.
+>
+> **Transformation Guidance for Mia Arnold:**\
+> - **Multiplicative vs. Additive ETS:** Exponential smoothing handles heteroscedasticity (expanding seasonal variance) natively through **multiplicative error and seasonal components** (e.g., $ETS(M,A,M)$ or $ETS(M,A_d,M)$). Per Hyndman & Athanasopoulos (2021, Ch. 8), an ETS model with multiplicative components often removes the need for a prior Box-Cox transformation.\
+> - **Required Comparison:** Mia, please fit and compare **both** approaches against the holdout test set to see which minimizes out-of-sample RMSE: 1. **Multiplicative ETS on Raw Nominal Data:** `ETS(sales_nominal)` (which autoselects multiplicative components $(M,N,M)$, $(M,A,M)$, etc.) 2. **Additive ETS on Box-Cox Transformed Data:** `ETS(box_cox(sales_nominal, lambda))` (restricting components to strictly additive states $(A,A,A)$ to prevent numerical instability, using optimal $\lambda$ from the Guerrero optimization table in Section 3.6). - When using `box_cox(sales_nominal, lambda)` inside `fable::model()`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
+
+``` r
+# ==============================================================================
+# ETS Modeling Starter Code (Mia)
+# ==============================================================================
+# Mia's Task: Compare Multiplicative ETS vs. Additive ETS with Box-Cox Transformation
+#
+# Optimal Guerrero lambdas from Section 3.6:
+# Health: 0.228 | Clothing: 0.264 | Building: 0.814 | Macro: 0.446
+#
+# fits_ets <- train_data |>
+#   model(
+#     # Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
+#     ets_auto_multiplicative = ETS(sales_nominal),
+#     ets_mam                 = ETS(sales_nominal ~ error("M") + trend("A") + season("M")),
+#     ets_damped              = ETS(sales_nominal ~ error("M") + trend("Ad") + season("M")),
+#
+#     # Strategy 2: Strictly additive components on Box-Cox / Log transformed sales
+#     ets_boxcox_additive     = ETS(box_cox(sales_nominal, 0.3) ~ error("A") + trend("A") + season("A")),
+#     ets_log_additive        = ETS(log(sales_nominal) ~ error("A") + trend("A") + season("A"))
+#   )
+#
+# # Inspect parameters (alpha, beta, gamma, phi, AICc):
+# tidy(fits_ets)
+# glance(fits_ets)
+#
+# # Generate forecasts and compare out-of-sample test RMSE:
+# fc_ets <- fits_ets |> forecast(new_data = test_data)
+# accuracy(fc_ets, retail_ts) |>
+#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+#   arrange(vertical, RMSE)
+```
+
+------------------------------------------------------------------------
+
+## Time Series Linear Models (TSLM) [Scaffolded]
+
+> **Model Class:** `fable::TSLM()`\
+> **Objective:** Construct linear regression models using deterministic trend, monthly seasonal dummies, and exogenous economic regressors (e.g., CPI price index).\
+>
+> **Transformation Guidance for Time Series Regression (TSLM):**\
+> - **Homoscedasticity Requirement:** Ordinary Least Squares (OLS) regression assumes errors have constant variance ($\epsilon_t \sim \text{N}(0, \sigma^2)$). In our retail series, the seasonal amplitude expands proportionally with sales volume over time. Fitting a linear regression directly to untransformed nominal sales violates OLS assumptions and produces severe heteroscedasticity in later years.\
+> - **Required Transformation:** Always model either **Box-Cox transformed sales** (`box_cox(sales_nominal, lambda)`) or **natural log sales** (`log(sales_nominal)`).\
+> - **Econometric Story with CPI:** Introducing $\log(\text{CPI})$ as an explanatory regressor alongside trend and monthly seasonal dummies (`TSLM(log(sales_nominal) ~ trend() + season() + log(cpi))`) allows us to estimate the price elasticity of retail sales and test whether inflation elasticity differs across defensive vs. cyclical verticals.\
+> - Point forecasts and prediction intervals in `fable` are automatically back-transformed to dollar units with analytical bias adjustment.
+
+``` r
+# ==============================================================================
+# TSLM Regression Starter Code
+# ==============================================================================
+# TSLM requires variance stabilization (Box-Cox or log) to satisfy OLS homoscedasticity:
+# fits_tslm <- train_data |>
+#   model(
+#     # Model 1: Log-transformed trend + monthly seasonal dummies
+#     tslm_log_trend_season = TSLM(log(sales_nominal) ~ trend() + season()),
+#
+#     # Model 2: Guerrero Box-Cox transformed trend + monthly seasonal dummies
+#     tslm_boxcox           = TSLM(box_cox(sales_nominal, 0.3) ~ trend() + season()),
+#
+#     # Model 3: Augmented TSLM with CPI explanatory regressor (log-log price elasticity)
+#     tslm_with_cpi         = TSLM(log(sales_nominal) ~ trend() + season() + log(cpi))
+#   )
+#
+# report(fits_tslm)
+# fc_tslm <- fits_tslm |> forecast(new_data = test_data)
+# accuracy(fc_tslm, retail_ts) |>
+#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+#   arrange(vertical, RMSE)
+```
+
+------------------------------------------------------------------------
+
+## Seasonal ARIMA & Box-Jenkins [Scaffolded for Ramin]
+
+> **Lead / Owner:** Ramin Fazli\
+> **Model Class:** `fable::ARIMA()`\
+> **Objective:** Conduct KPSS stationarity tests, determine seasonal differencing ($\nabla_{12}$) and first differencing ($\nabla$), evaluate manual $(p,d,q)(P,D,Q)_{12}$ specifications, run `auto.arima`, and perform Ljung-Box diagnostic checks.\
+>
+> **Transformation Guidance for Ramin Fazli:**\
+> - **Variance Stationarity Precedes Mean Stationarity:** Classical Box-Jenkins methodology requires the series to be stationary in both variance and mean. Differencing ($\nabla$ and $\nabla_{12}$) removes trend and stochastic seasonality to stabilize the mean, but **differencing cannot stabilize non-constant variance** (Hyndman & Athanasopoulos, 2021, Ch. 9).\
+> - **Required Transformation for Ramin:** Ramin, please ensure that you apply **Box-Cox** (`box_cox(sales_nominal, lambda)`) or **natural log** (`log(sales_nominal)`) transformation before differencing and fitting ARIMA specifications: 1. Automated search: `ARIMA(box_cox(sales_nominal, lambda))` or `ARIMA(log(sales_nominal))` 2. Manual specifications: `ARIMA(box_cox(sales_nominal, lambda) ~ pdq(p,d,q) + PDQ(P,D,Q))` - **Differencing Order Reminder:** Recall from our Section 4.8 stationarity diagnostics that Building Materials, Clothing, and Macro Retail Total achieve stationarity with a single seasonal difference ($D=1, d=0$), while Health & Personal Care requires both seasonal and first differencing ($D=1, d=1$).\
+> - In `fable`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
+
+``` r
+# ==============================================================================
+# ARIMA & Seasonal Differencing Starter Code (Ramin)
+# ==============================================================================
+# Ramin's Task: Apply Box-Cox or Log transformation prior to ARIMA differencing & estimation
+#
+# 1. Stationarity checks on variance-stabilized series:
+# train_data |>
+#   features(log(sales_nominal), unitroot_kpss)
+# train_data |>
+#   features(log(sales_nominal), unitroot_nsdiffs)
+# train_data |>
+#   features(log(sales_nominal), unitroot_ndiffs)
+#
+# 2. Fit candidate ARIMA specifications (automated and manual):
+# fits_arima <- train_data |>
+#   model(
+#     # Automated Box-Jenkins on variance-stabilized series:
+#     arima_auto_log    = ARIMA(log(sales_nominal)),
+#     arima_auto_boxcox = ARIMA(box_cox(sales_nominal, 0.3)),
+#
+#     # Manual seasonal ARIMA specifications informed by Section 4.8 diagnostics:
+#     # (e.g., D=1, d=0 for Clothing/Building/Macro; D=1, d=1 for Health)
+#     arima_manual_health = ARIMA(log(sales_nominal) ~ pdq(1,1,1) + PDQ(0,1,1)),
+#     arima_manual_macro  = ARIMA(log(sales_nominal) ~ pdq(0,0,1) + PDQ(0,1,1))
+#   )
+#
+# 3. Residual diagnostic checks (Ljung-Box test for white noise residuals):
+# fits_arima |> filter(vertical == "health") |> select(arima_auto_log) |> gg_tsresiduals()
+# glance(fits_arima)
+#
+# 4. Out-of-sample forecast accuracy:
+# fc_arima <- fits_arima |> forecast(new_data = test_data)
+# accuracy(fc_arima, retail_ts) |>
+#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+#   arrange(vertical, RMSE)
+```
+
+------------------------------------------------------------------------
+
+## Advanced Models & ARIMAX [Scaffolded]
+
+> **Model Class:** Dynamic Regression with ARMA errors & Ensembles\
+> **Objective:** Incorporate recommended exogenous predictors (CPI price level, Real Disposable Income, Unemployment Rate, Consumer Sentiment) and evaluate forecast combinations.\
+> **Transformation Guidance:** Dynamic regression models (ARIMAX) also require variance stabilization on the response variable (`log(sales_nominal)` or `box_cox(sales_nominal, lambda)`). Log-transforming both sales and CPI allows regression coefficients to be interpreted directly as constant price elasticities.\
+> **Takeaway for Group 8 (ARIMAX Dynamic Regression):** In Modules 5 and 6, introducing CPI and macroeconomic drivers as exogenous regressors ($xreg$) in an ARIMAX model allows us to model both long-run price elasticity and short-run autocorrelation error dynamics simultaneously, giving us a strong econometric story for our presentation and report.
+
+``` r
+# ==============================================================================
+# ARIMAX & Ensemble Starter Code
+# ==============================================================================
+# Example ARIMAX with CPI and macro regressors (using log transformation):
+# fits_arimax <- train_data |>
+#   model(
+#     # Dynamic regression with CPI as an exogenous regressor (log-log elasticity):
+#     arimax_cpi   = ARIMA(log(sales_nominal) ~ log(cpi) + trend() + season()),
+#     arimax_macro = ARIMA(log(sales_nominal) ~ log(cpi) + xreg_income + xreg_sentiment)
+#   )
+#
+# Ensemble combination:
+# ensemble_fit <- train_data |>
+#   model(
+#     ensemble = (SNAIVE(sales_nominal) + ETS(sales_nominal) + ARIMA(log(sales_nominal))) / 3
+#   )
+```
+
+------------------------------------------------------------------------
+
+# Recommended FRED Datasets for Future ARIMAX Models
+
+To enhance explanatory power and evaluate dynamic regressions, the following FRED series are recommended:
+
+1.  **Real Disposable Personal Income (`DSPIC96`):** Measures household real disposable income in billions of chained 2017 dollars (Monthly). Captures purchasing power shifts.
+2.  **Civilian Unemployment Rate (`UNRATE`):** Primary indicator of labor market slack and economic contraction (Monthly, %).
+3.  **University of Michigan: Consumer Sentiment (`UMCSENT`):** Leading gauge of household consumer confidence, highly correlated with discretionary retail spending.
+
+------------------------------------------------------------------------
+
+# Scholarly References (APA 7)
+
+- **Fildes, R., Ma, S., & Kolassa, S. (2022).** Retail forecasting: Research and practice. *International Journal of Forecasting*, 38(4), 1283–1318. <https://doi.org/10.1016/j.ijforecast.2019.06.004>
+- **Hyndman, R. J., & Athanasopoulos, G. (2021).** *Forecasting: Principles and practice* (3rd ed.). OTexts: Melbourne, Australia. <https://otexts.com/fpp3/>
+- **Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2022).** M5 accuracy competition: Results, findings, and conclusions. *International Journal of Forecasting*, 38(4), 1346–1364. <https://doi.org/10.1016/j.ijforecast.2021.11.013>

@@ -1,0 +1,5 @@
+vertical,best_model,aicc_model
+building,auto_log,arima_tradingday
+clothing,auto_boxcox,arima_tradingday
+health,arima_tradingday,arima_tradingday
+macro_retail,auto_boxcox,arima_tradingday

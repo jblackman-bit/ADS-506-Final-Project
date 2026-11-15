@@ -749,7 +749,6 @@ fc_baseline |>
 >
 > 2\. **Additive ETS on Box-Cox Transformed Data:** `ETS(box_cox(sales_nominal, lambda))` (restricting components to strictly additive states $(A,A,A)$ to prevent numerical instability, using optimal $\lambda$ from the Guerrero optimization table in Section 3.6). - When using `box_cox(sales_nominal, lambda)` inside `fable::model()`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
 
-``` r
 # ==============================================================================
 # ETS Modeling Starter Code (Mia)
 # ==============================================================================
@@ -757,28 +756,50 @@ fc_baseline |>
 #
 # Optimal Guerrero lambdas from Section 3.6:
 # Health: 0.228 | Clothing: 0.264 | Building: 0.814 | Macro: 0.446
-#
-# fits_ets <- train_data |>
-#   model(
-#     # Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
-#     ets_auto_multiplicative = ETS(sales_nominal),
-#     ets_mam                 = ETS(sales_nominal ~ error("M") + trend("A") + season("M")),
-#     ets_damped              = ETS(sales_nominal ~ error("M") + trend("Ad") + season("M")),
-#
-#     # Strategy 2: Strictly additive components on Box-Cox / Log transformed sales
-#     ets_boxcox_additive     = ETS(box_cox(sales_nominal, 0.3) ~ error("A") + trend("A") + season("A")),
-#     ets_log_additive        = ETS(log(sales_nominal) ~ error("A") + trend("A") + season("A"))
-#   )
-#
-# # Inspect parameters (alpha, beta, gamma, phi, AICc):
-# tidy(fits_ets)
-# glance(fits_ets)
-#
-# # Generate forecasts and compare out-of-sample test RMSE:
-# fc_ets <- fits_ets |> forecast(new_data = test_data)
-# accuracy(fc_ets, retail_ts) |>
-#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
-#   arrange(vertical, RMSE)
+# *Note on lamda: "Applying 0.3 across all verticals under- or over-transforms half your series. Moreover, lambda should be estimated strictly on train_data (pre-2024) so test-set variance doesn't leak into training."*
+
+```{r}
+fits_ets <- train_data |>
+  model(
+    # Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
+    ets_auto_multiplicative = ETS(sales_nominal),
+    ets_mam                 = ETS(sales_nominal ~ error("M") + trend("A") + season("M")),
+    ets_damped              = ETS(sales_nominal ~ error("M") + trend("Ad") + season("M")),
+
+    # Strategy 2: Strictly additive components on Log transformed sales
+    ets_log_additive        = ETS(log(sales_nominal) ~ error("A") + trend("A") + season("A")),
+    ets_log_damped          = ETS(log(sales_nominal) ~ error("A") + trend("Ad") + season("A"))
+  )
+    # Strategy 3: Fit vertical-specific Guerrero Box-Cox Additive ETS cleanly per key
+  train_lambdas <- train_data |>
+  features(sales_nominal, features = guerrero)
+
+  fits_ets_bc <- train_data |>
+    left_join(train_lambdas, by = "vertical") |>
+    group_split(vertical) |>
+    map(\(df) {
+      lam <- unique(df$lambda_guerrero)
+      df |>
+        model(
+          ets_boxcox_add    = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("A")  + season("A")),
+          ets_boxcox_damped = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("Ad") + season("A"))
+        )
+    }) |>
+    reduce(bind_rows)
+
+# Combine all ETS models into one mable
+fits_ets_all <- fits_ets |>
+  left_join(fits_ets_bc, by = "vertical")
+
+# Inspect parameters (alpha, beta, gamma, phi, AICc):
+tidy(fits_ets_all)
+glance(fits_ets_all)
+
+# Generate forecasts and compare out-of-sample test RMSE:
+fc_ets <- fits_ets_all |> forecast(new_data = test_data)
+accuracy(fc_ets, retail_ts) |>
+  select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+  arrange(vertical, RMSE)
 ```
 
 ------------------------------------------------------------------------
@@ -794,28 +815,52 @@ fc_baseline |>
 > - **Econometric Story with CPI:** Introducing $\log(\text{CPI})$ as an explanatory regressor alongside trend and monthly seasonal dummies (`TSLM(log(sales_nominal) ~ trend() + season() + log(cpi))`) allows us to estimate the price elasticity of retail sales and test whether inflation elasticity differs across defensive vs. cyclical verticals.\
 > - Point forecasts and prediction intervals in `fable` are automatically back-transformed to dollar units with analytical bias adjustment.
 
-``` r
+# *Note on TSLM: "... a 4-model progression can isolate what actually improves fit and out-of-sample accuracy..."*
+
 # ==============================================================================
 # TSLM Regression Starter Code
 # ==============================================================================
+
+```{r}
 # TSLM requires variance stabilization (Box-Cox or log) to satisfy OLS homoscedasticity:
-# fits_tslm <- train_data |>
-#   model(
-#     # Model 1: Log-transformed trend + monthly seasonal dummies
-#     tslm_log_trend_season = TSLM(log(sales_nominal) ~ trend() + season()),
-#
-#     # Model 2: Guerrero Box-Cox transformed trend + monthly seasonal dummies
-#     tslm_boxcox           = TSLM(box_cox(sales_nominal, 0.3) ~ trend() + season()),
-#
-#     # Model 3: Augmented TSLM with CPI explanatory regressor (log-log price elasticity)
-#     tslm_with_cpi         = TSLM(log(sales_nominal) ~ trend() + season() + log(cpi))
-#   )
-#
-# report(fits_tslm)
-# fc_tslm <- fits_tslm |> forecast(new_data = test_data)
-# accuracy(fc_tslm, retail_ts) |>
-#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
-#   arrange(vertical, RMSE)
+fits_tslm <- train_data |>
+  model(
+    # Model 1: Log-transformed trend + monthly seasonal dummies
+    tslm_log_trend_season = TSLM(log(sales_nominal) ~ trend() + season()),
+    tslm__log_piecewise_covid = TSLM(
+      log(sales_nominal) ~ trend(knots = yearmonth("2020 Mar")) + season() +
+        I(Month >= yearmonth("2020 Mar") & Month <= yearmonth("2020 May"))
+    ),
+
+    # Model 2: Augmented TSLM with CPI explanatory regressor (log-log price elasticity)
+    tslm_with_cpi         = TSLM(log(sales_nominal) ~ trend() + season() + log(cpi)),
+    tslm_cpi_piecewise_covid = TSLM(
+      log(sales_nominal) ~ trend(knots = yearmonth("2020 Mar")) + season() + log(cpi) +
+        I(Month >= yearmonth("2020 Mar") & Month <= yearmonth("2020 May")))
+  )
+
+    # Model 3: Fit vertical-specific Guerrero Box-Cox lambdas
+    fits_tslm_bc <- train_data |>
+  left_join(train_lambdas, by = "vertical") |>
+  group_split(vertical) |>
+  map(\(df) {
+    lam <- unique(df$lambda_guerrero)
+    df |>
+      model(
+        tslm_boxcox = TSLM(box_cox(sales_nominal, lam) ~ trend() + season())
+      )
+  }) |>
+  reduce(bind_rows)
+
+# Combine all TSLM models into one mable
+fits_tslm_all <- fits_tslm |>
+  left_join(fits_tslm_bc, by = "vertical")
+
+report(fits_tslm_all)
+fc_tslm <- fits_tslm_all |> forecast(new_data = test_data)
+accuracy(fc_tslm, retail_ts) |>
+  select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
+  arrange(vertical, RMSE)
 ```
 
 ------------------------------------------------------------------------

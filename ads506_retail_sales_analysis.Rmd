@@ -166,6 +166,43 @@ retail_ts <- retail_tidy |>
 cat("Any implicit time gaps in tsibble:", any(has_gaps(retail_ts)$.gaps), "\n")
 ```
 
+## Trading-Day Calendar Regressors
+
+Because these series are not seasonally adjusted, monthly sales depend partly on the calendar: a month with five Saturdays sells more than one with four, even with identical demand (Fildes et al., 2022). We count each weekday in every month and express Monday through Saturday relative to Sunday, plus the number of days in the month. These regressors are fixed calendar facts, so they are known for any future month and can be used by TSLM, ARIMAX, and the forecasting dashboard without extra data.
+
+```{r trading-day-regressors}
+# Number of times weekday k (1 = Sunday ... 7 = Saturday) occurs in each month
+count_wday <- function(month, k) {
+  start <- as.Date(month)
+  n_days <- lubridate::days_in_month(start)
+  vapply(seq_along(start),
+         function(i) sum(lubridate::wday(start[i] + 0:(n_days[i] - 1)) == k),
+         numeric(1))
+}
+
+# Adds trading-day regressors to any tsibble with a yearmonth `Month` index
+add_trading_days <- function(data) {
+  data |>
+    mutate(
+      td_mon = count_wday(Month, 2) - count_wday(Month, 1),
+      td_tue = count_wday(Month, 3) - count_wday(Month, 1),
+      td_wed = count_wday(Month, 4) - count_wday(Month, 1),
+      td_thu = count_wday(Month, 5) - count_wday(Month, 1),
+      td_fri = count_wday(Month, 6) - count_wday(Month, 1),
+      td_sat = count_wday(Month, 7) - count_wday(Month, 1),
+      days_in_month = as.numeric(lubridate::days_in_month(as.Date(Month)))
+    )
+}
+
+retail_ts <- retail_ts |> add_trading_days()
+
+retail_ts |>
+  as_tibble() |>
+  filter(vertical == "health", Month >= yearmonth("2026 Jan")) |>
+  select(Month, starts_with("td_"), days_in_month) |>
+  knitr::kable(caption = "Trading-day regressors (first months of 2026)")
+```
+
 ## Export Clean Dataset
 
 We save the processed tidy dataset to `data/retail_data_clean.csv` for use by the Shiny application and team members.
@@ -865,86 +902,368 @@ accuracy(fc_tslm, retail_ts) |>
 
 ------------------------------------------------------------------------
 
-## Seasonal ARIMA & Box-Jenkins [Scaffolded for Ramin]
+## Seasonal ARIMA & Box-Jenkins [Implemented: Ramin]
 
 > **Lead / Owner:** Ramin Fazli\
-> **Model Class:** `fable::ARIMA()`\
-> **Objective:** Conduct KPSS stationarity tests, determine seasonal differencing ($\nabla_{12}$) and first differencing ($\nabla$), evaluate manual $(p,d,q)(P,D,Q)_{12}$ specifications, run `auto.arima`, and perform Ljung-Box diagnostic checks.\
->
-> **Transformation Guidance for Ramin Fazli:**\
-> - **Variance Stationarity Precedes Mean Stationarity:** Classical Box-Jenkins methodology requires the series to be stationary in both variance and mean. Differencing ($\nabla$ and $\nabla_{12}$) removes trend and stochastic seasonality to stabilize the mean, but **differencing cannot stabilize non-constant variance** (Hyndman & Athanasopoulos, 2021, Ch. 9).\
-> - **Required Transformation for Ramin:** Ramin, please ensure that you apply **Box-Cox** (`box_cox(sales_nominal, lambda)`) or **natural log** (`log(sales_nominal)`) transformation before differencing and fitting ARIMA specifications:
->
-> 1\. Automated search: `ARIMA(box_cox(sales_nominal, lambda))` or `ARIMA(log(sales_nominal))`
->
-> 2\. Manual specifications: `ARIMA(box_cox(sales_nominal, lambda) ~ pdq(p,d,q) + PDQ(P,D,Q))` - **Differencing Order Reminder:** Recall from our Section 4.8 stationarity diagnostics that Building Materials, Clothing, and Macro Retail Total achieve stationarity with a single seasonal difference ($D=1, d=0$), while Health & Personal Care requires both seasonal and first differencing ($D=1, d=1$).\
-> - In `fable`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
+> **Model Class:** `fable::ARIMA()` (pure univariate seasonal ARIMA)\
+> **Objective:** Test stationarity on the log scale, identify candidate $(p,d,q)(P,D,Q)_{12}$ orders from ACF/PACF plots, compare automated and manual specifications, check residuals with the Ljung-Box test, and evaluate out-of-sample accuracy against the baselines.
 
-``` r
-# ==============================================================================
-# ARIMA & Seasonal Differencing Starter Code (Ramin)
-# ==============================================================================
-# Ramin's Task: Apply Box-Cox or Log transformation prior to ARIMA differencing & estimation
-#
-# 1. Stationarity checks on variance-stabilized series:
-# train_data |>
-#   features(log(sales_nominal), unitroot_kpss)
-# train_data |>
-#   features(log(sales_nominal), unitroot_nsdiffs)
-# train_data |>
-#   features(log(sales_nominal), unitroot_ndiffs)
-#
-# 2. Fit candidate ARIMA specifications (automated and manual):
-# fits_arima <- train_data |>
-#   model(
-#     # Automated Box-Jenkins on variance-stabilized series:
-#     arima_auto_log    = ARIMA(log(sales_nominal)),
-#     arima_auto_boxcox = ARIMA(box_cox(sales_nominal, 0.3)),
-#
-#     # Manual seasonal ARIMA specifications informed by Section 4.8 diagnostics:
-#     # (e.g., D=1, d=0 for Clothing/Building/Macro; D=1, d=1 for Health)
-#     arima_manual_health = ARIMA(log(sales_nominal) ~ pdq(1,1,1) + PDQ(0,1,1)),
-#     arima_manual_macro  = ARIMA(log(sales_nominal) ~ pdq(0,0,1) + PDQ(0,1,1))
-#   )
-#
-# 3. Residual diagnostic checks (Ljung-Box test for white noise residuals):
-# fits_arima |> filter(vertical == "health") |> select(arima_auto_log) |> gg_tsresiduals()
-# glance(fits_arima)
-#
-# 4. Out-of-sample forecast accuracy:
-# fc_arima <- fits_arima |> forecast(new_data = test_data)
-# accuracy(fc_arima, retail_ts) |>
-#   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
-#   arrange(vertical, RMSE)
+### Stationarity on the Log Scale
+
+ARIMA is fitted to `log(sales_nominal)` to stabilize the growing seasonal swings before differencing, since differencing cannot fix non-constant variance (Hyndman & Athanasopoulos, 2021, Ch. 9). The diagnostics in Section 4.8 tested raw sales; the table below repeats them on the log scale used for modeling, using the training period only.
+
+```{r arima-stationarity}
+arima_stationarity <- train_data |>
+  features(log(sales_nominal), unitroot_nsdiffs) |>
+  left_join(
+    train_data |>
+      group_by_key() |>
+      mutate(log_d12 = difference(log(sales_nominal), 12)) |>
+      ungroup() |>
+      features(log_d12, list(unitroot_ndiffs, unitroot_kpss)),
+    by = "vertical"
+  )
+
+arima_stationarity |>
+  transmute(
+    Vertical = vertical,
+    `Seasonal diff (D)` = nsdiffs,
+    `First diff (d) after D = 1` = ndiffs,
+    `KPSS stat after D = 1` = round(kpss_stat, 3),
+    `KPSS p-value` = round(kpss_pvalue, 3)
+  ) |>
+  knitr::kable(caption = "Log-scale differencing diagnostics (training data, 1992-2023)")
 ```
+
+On the log scale every series needs one seasonal difference. Clothing is stationary after that, while Health, Building, and the Macro total also need a first difference (for Building and Macro the KPSS result is borderline, p just under 0.05).
+
+### Identifying Candidate Orders (ACF / PACF)
+
+```{r arima-acf-pacf, fig.height=9}
+arima_differenced <- train_data |>
+  group_by_key() |>
+  mutate(
+    d_series = if_else(
+      vertical == "clothing",
+      difference(log(sales_nominal), 12),
+      difference(difference(log(sales_nominal), 12), 1)
+    )
+  ) |>
+  ungroup()
+
+acf_tbl  <- arima_differenced |> ACF(d_series, lag_max = 36) |> as_tibble() |> mutate(type = "ACF", value = acf)
+pacf_tbl <- arima_differenced |> PACF(d_series, lag_max = 36) |> as_tibble() |> mutate(type = "PACF", value = pacf)
+n_obs <- arima_differenced |> as_tibble() |> filter(!is.na(d_series)) |> count(vertical)
+
+bind_rows(acf_tbl, pacf_tbl) |>
+  mutate(lag = as.numeric(lag)) |>
+  left_join(n_obs, by = "vertical") |>
+  ggplot(aes(lag, value)) +
+  geom_segment(aes(xend = lag, yend = 0)) +
+  geom_hline(aes(yintercept = 1.96 / sqrt(n)), linetype = "dashed", colour = "blue") +
+  geom_hline(aes(yintercept = -1.96 / sqrt(n)), linetype = "dashed", colour = "blue") +
+  facet_grid(vertical ~ type) +
+  labs(title = "ACF and PACF of differenced log sales",
+       subtitle = "Clothing: seasonal difference only; other series: seasonal + first difference",
+       x = "Lag (months)", y = NULL)
+```
+
+For Health, Building, and Macro, the differenced series show a clear negative spike at lag 1 (and at lag 2 in the PACF), and Health and Macro also show negative autocorrelation at lag 12. This points to low-order AR or MA terms with a seasonal MA(1). For Clothing, the PACF cuts off after one or two lags and the ACF has a clear negative spike at lag 12, which points to an AR(2) or ARMA(1,1) with a seasonal MA(1). These patterns give the manual candidates below; the airline model $(0,1,1)(0,1,1)_{12}$ is included as a classic retail benchmark.
+
+### Candidate Models
+
+```{r arima-fit, cache=TRUE}
+arima_lambdas <- train_data |> features(sales_nominal, features = guerrero)
+
+fit_arima_vertical <- function(df) {
+  lam <- arima_lambdas$lambda_guerrero[arima_lambdas$vertical == unique(df$vertical)]
+  if (unique(df$vertical) == "clothing") {
+    df |> model(
+      auto_log    = ARIMA(log(sales_nominal)),
+      auto_boxcox = ARIMA(box_cox(sales_nominal, lam)),
+      manual_a    = ARIMA(log(sales_nominal) ~ 1 + pdq(2, 0, 0) + PDQ(0, 1, 1)),
+      manual_b    = ARIMA(log(sales_nominal) ~ 1 + pdq(1, 0, 1) + PDQ(0, 1, 1)),
+      airline     = ARIMA(log(sales_nominal) ~ 0 + pdq(0, 1, 1) + PDQ(0, 1, 1))
+    )
+  } else {
+    df |> model(
+      auto_log    = ARIMA(log(sales_nominal)),
+      auto_boxcox = ARIMA(box_cox(sales_nominal, lam)),
+      manual_a    = ARIMA(log(sales_nominal) ~ 0 + pdq(2, 1, 0) + PDQ(0, 1, 1)),
+      manual_b    = ARIMA(log(sales_nominal) ~ 0 + pdq(0, 1, 2) + PDQ(0, 1, 1)),
+      airline     = ARIMA(log(sales_nominal) ~ 0 + pdq(0, 1, 1) + PDQ(0, 1, 1))
+    )
+  }
+}
+
+fits_arima <- train_data |>
+  group_split(vertical) |>
+  map(fit_arima_vertical) |>
+  reduce(bind_rows)
+
+fc_arima <- fits_arima |> forecast(new_data = test_data)
+```
+
+```{r arima-model-table}
+# Ljung-Box on innovation residuals (lag 24 = 2 seasonal cycles; dof = number of ARMA terms)
+arma_terms <- tidy(fits_arima) |>
+  filter(str_detect(term, "^(ar|ma|sar|sma)[0-9]")) |>
+  count(vertical, .model, name = "dof")
+
+arima_lb <- augment(fits_arima) |>
+  as_tibble() |>
+  filter(!is.na(.innov)) |>
+  left_join(arma_terms, by = c("vertical", ".model")) |>
+  group_by(vertical, .model) |>
+  summarise(lb_pvalue = Box.test(.innov, lag = 24, type = "Ljung-Box", fitdf = first(dof))$p.value,
+            .groups = "drop")
+
+arima_specs <- fits_arima |>
+  pivot_longer(-vertical, names_to = ".model", values_to = "fit") |>
+  as_tibble() |>
+  mutate(Specification = map_chr(fit, format)) |>
+  select(vertical, .model, Specification)
+
+arima_accuracy <- accuracy(fc_arima, retail_ts) |>
+  select(vertical, .model, RMSE, MAE, MAPE, MASE)
+
+arima_summary <- arima_specs |>
+  left_join(glance(fits_arima) |> select(vertical, .model, AICc), by = c("vertical", ".model")) |>
+  left_join(arima_lb, by = c("vertical", ".model")) |>
+  left_join(arima_accuracy, by = c("vertical", ".model")) |>
+  arrange(vertical, RMSE)
+
+arima_summary |>
+  mutate(AICc = if_else(.model == "auto_boxcox", NA_real_, AICc)) |>
+  knitr::kable(digits = c(0, 0, 0, 1, 3, 1, 1, 2, 3),
+               caption = "Seasonal ARIMA candidates: specification, training AICc, Ljung-Box p-value, and 2024-2026 test accuracy (sorted by test RMSE). AICc is omitted for Box-Cox models because it is not comparable across transformations.")
+```
+
+### Model Selection & Residual Diagnostics
+
+The model for each series is selected by **training AICc among the log-scale models**, so the choice does not depend on the test set. `auto_log` has the lowest AICc for all four series.
+
+```{r arima-selected}
+arima_selected <- arima_summary |>
+  filter(.model != "auto_boxcox") |>
+  group_by(vertical) |>
+  slice_min(AICc, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+arima_selected |>
+  left_join(baseline_accuracy |> group_by(vertical) |> slice_min(RMSE, n = 1) |>
+              select(vertical, best_baseline = .model, baseline_RMSE = RMSE),
+            by = "vertical") |>
+  transmute(Vertical = vertical, Model = .model, Specification,
+            `Ljung-Box p` = round(lb_pvalue, 3),
+            `Test RMSE` = round(RMSE, 1), `Test MAPE` = round(MAPE, 2),
+            `Best baseline` = best_baseline, `Baseline RMSE` = round(baseline_RMSE, 1)) |>
+  knitr::kable(caption = "Selected seasonal ARIMA model per series vs. the best baseline")
+```
+
+```{r arima-residuals, fig.height=5}
+for (v in unique(arima_selected$vertical)) {
+  m <- arima_selected$.model[arima_selected$vertical == v]
+  p <- fits_arima |>
+    filter(vertical == v) |>
+    select(vertical, all_of(m)) |>
+    gg_tsresiduals(lag_max = 36) +
+    labs(title = paste0(v, ": residuals of ", m))
+  print(p)
+}
+```
+
+```{r arima-forecast-plot, fig.height=10}
+arima_fc_plot <- fc_arima |>
+  semi_join(arima_selected, by = c("vertical", ".model")) |>
+  hilo(level = c(80, 95)) |>
+  unpack_hilo(c(`80%`, `95%`)) |>
+  as_tibble()
+
+snaive_fc_plot <- fc_baseline |> filter(.model == "snaive") |> as_tibble()
+
+ggplot() +
+  geom_ribbon(data = arima_fc_plot, aes(Month, ymin = `95%_lower`, ymax = `95%_upper`), fill = "#2b6cb0", alpha = 0.15) +
+  geom_ribbon(data = arima_fc_plot, aes(Month, ymin = `80%_lower`, ymax = `80%_upper`), fill = "#2b6cb0", alpha = 0.25) +
+  geom_line(data = snaive_fc_plot, aes(Month, .mean, colour = "Seasonal naive (baseline)"), linetype = "dashed") +
+  geom_line(data = arima_fc_plot, aes(Month, .mean, colour = "Seasonal ARIMA (auto_log)")) +
+  geom_line(data = retail_ts |> as_tibble() |> filter(Month >= yearmonth("2019 Jan")),
+            aes(Month, sales_nominal, colour = "Actual sales")) +
+  scale_colour_manual(values = c("Actual sales" = "black", "Seasonal ARIMA (auto_log)" = "#2b6cb0",
+                                 "Seasonal naive (baseline)" = "grey50"), name = NULL) +
+  facet_wrap(vars(vertical), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(title = "Seasonal ARIMA vs. actual sales, 2024-2026 test period",
+       subtitle = "Shaded: 80% / 95% prediction intervals",
+       y = "Monthly sales (USD millions)", x = NULL) +
+  theme(legend.position = "top")
+```
+
+```{r arima-inline-helpers, include=FALSE}
+a_rmse <- function(v) scales::comma(arima_selected$RMSE[arima_selected$vertical == v], accuracy = 1)
+b_rmse <- function(v) scales::comma(min(baseline_accuracy$RMSE[baseline_accuracy$vertical == v]), accuracy = 1)
+```
+
+**ARIMA interpretation.** The selected seasonal ARIMA beats the best baseline for three of the four series: Clothing (test RMSE `r a_rmse("clothing")` vs. `r b_rmse("clothing")` for seasonal naive), Health (`r a_rmse("health")` vs. `r b_rmse("health")` for drift), and the Macro total (`r a_rmse("macro_retail")` vs. `r b_rmse("macro_retail")`). Building is the exception (`r a_rmse("building")` vs. `r b_rmse("building")`): sales went flat in 2025 and 2026, and the model carried the 2020-2022 growth forward, while seasonal naive simply repeated the previous year.
+
+Two caveats matter for the report. First, only Clothing passes the Ljung-Box test; Building, Health, and Macro keep significant autocorrelation at several lags, and the pattern is already present before 2020, so it is not just the COVID shock. Their prediction intervals should therefore be read with caution. Second, the Box-Cox versions score better on the test set for Clothing and Macro, but they were not selected, because AICc cannot compare models on different transformations and the test set should not drive model choice. The leftover autocorrelation is addressed in the next section by adding trading-day regressors.
 
 ------------------------------------------------------------------------
 
-## Advanced Models & ARIMAX [Scaffolded]
+## Dynamic Regression (ARIMAX), Fourier Terms & Ensembles [Implemented: Ramin]
 
-> **Model Class:** Dynamic Regression with ARMA errors & Ensembles\
-> **Objective:** Incorporate recommended exogenous predictors (CPI price level, Real Disposable Income, Unemployment Rate, Consumer Sentiment) and evaluate forecast combinations.\
-> **Transformation Guidance:** Dynamic regression models (ARIMAX) also require variance stabilization on the response variable (`log(sales_nominal)` or `box_cox(sales_nominal, lambda)`). Log-transforming both sales and CPI allows regression coefficients to be interpreted directly as constant price elasticities.\
-> **Takeaway for Group 8 (ARIMAX Dynamic Regression):** In Modules 5 and 6, introducing CPI and macroeconomic drivers as exogenous regressors ($xreg$) in an ARIMAX model allows us to model both long-run price elasticity and short-run autocorrelation error dynamics simultaneously, giving us a strong econometric story for our presentation and report.
+> **Lead / Owner:** Ramin Fazli\
+> **Model Class:** Regression with ARIMA errors (`ARIMA(y ~ xreg)`), dynamic harmonic regression (`fourier()`), and forecast combinations\
+> **Objective:** Test whether calendar and price information improves on univariate ARIMA, compare Fourier seasonality against seasonal differencing, and evaluate simple forecast ensembles (Makridakis et al., 2022).
 
-``` r
-# ==============================================================================
-# ARIMAX & Ensemble Starter Code
-# ==============================================================================
-# Example ARIMAX with CPI and macro regressors (using log transformation):
-# fits_arimax <- train_data |>
-#   model(
-#     # Dynamic regression with CPI as an exogenous regressor (log-log elasticity):
-#     arimax_cpi   = ARIMA(log(sales_nominal) ~ log(cpi) + trend() + season()),
-#     arimax_macro = ARIMA(log(sales_nominal) ~ log(cpi) + xreg_income + xreg_sentiment)
-#   )
-#
-# Ensemble combination:
-# ensemble_fit <- train_data |>
-#   model(
-#     ensemble = (SNAIVE(sales_nominal) + ETS(sales_nominal) + ARIMA(log(sales_nominal))) / 3
-#   )
+### ARIMAX with Trading Days and CPI
+
+The univariate models above leave significant autocorrelation in the residuals. Adding the trading-day regressors built in the Data Ingestion & Pipeline section lets the error model focus on true demand dynamics. We also test log CPI as a price regressor. **Note:** CPI forecasts are not available in practice, so the CPI models below use the *actual* 2024-2026 CPI (an ex-post evaluation); their accuracy is an upper bound on what a real forecast would achieve.
+
+```{r arimax-fit, cache=TRUE}
+fits_arimax <- train_data |>
+  model(
+    arimax_td     = ARIMA(log(sales_nominal) ~ td_mon + td_tue + td_wed + td_thu + td_fri + td_sat + days_in_month),
+    arimax_td_cpi = ARIMA(log(sales_nominal) ~ td_mon + td_tue + td_wed + td_thu + td_fri + td_sat + days_in_month + log(cpi))
+  )
 ```
+
+### Dynamic Harmonic Regression (Fourier Terms)
+
+Instead of seasonal differencing, dynamic harmonic regression models the annual cycle with $K$ pairs of sine and cosine terms and leaves short-run dynamics to ARMA errors (Hyndman & Athanasopoulos, 2021, Ch. 10.5). We search $K = 1, \dots, 6$ with a first difference for trend and no seasonal ARIMA terms, select $K$ by AICc for each series, and then add trading days to the selected specification.
+
+```{r dhr-fit, cache=TRUE}
+fits_dhr_k <- train_data |>
+  model(
+    K1 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 1)),
+    K2 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 2)),
+    K3 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 3)),
+    K4 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 4)),
+    K5 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 5)),
+    K6 = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = 6))
+  )
+
+dhr_k_choice <- glance(fits_dhr_k) |>
+  group_by(vertical) |>
+  slice_min(AICc, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(K = as.integer(str_remove(.model, "K")))
+
+glance(fits_dhr_k) |>
+  select(vertical, .model, AICc) |>
+  pivot_wider(names_from = .model, values_from = AICc) |>
+  left_join(dhr_k_choice |> select(vertical, `Selected K` = K), by = "vertical") |>
+  knitr::kable(digits = 1, caption = "Dynamic harmonic regression: training AICc by number of Fourier pairs (K)")
+
+fit_dhr_vertical <- function(df) {
+  k <- dhr_k_choice$K[dhr_k_choice$vertical == unique(df$vertical)]
+  df |> model(
+    dhr    = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = k)),
+    dhr_td = ARIMA(log(sales_nominal) ~ pdq(d = 1) + PDQ(0, 0, 0) + fourier(K = k) +
+                     td_mon + td_tue + td_wed + td_thu + td_fri + td_sat + days_in_month)
+  )
+}
+
+fits_dhr <- train_data |>
+  group_split(vertical) |>
+  map(fit_dhr_vertical) |>
+  reduce(bind_rows)
+```
+
+### Forecast Ensembles
+
+Forecast combinations consistently improved accuracy in the M competitions (Makridakis et al., 2022). We average the forecast distributions of models from different families. The ETS component is the automatic multiplicative ETS on raw sales (the same specification as `ets_auto_multiplicative` in the ETS section), refitted here so this section runs on its own.
+
+```{r ensemble-fit, cache=TRUE}
+fits_ensemble <- train_data |>
+  model(
+    ets_auto   = ETS(sales_nominal),
+    arima_log  = ARIMA(log(sales_nominal)),
+    arimax_td  = ARIMA(log(sales_nominal) ~ td_mon + td_tue + td_wed + td_thu + td_fri + td_sat + days_in_month),
+    tslm_log   = TSLM(log(sales_nominal) ~ trend() + season())
+  ) |>
+  mutate(
+    ens_ets_arima        = (ets_auto + arima_log) / 2,
+    ens_ets_arimax       = (ets_auto + arimax_td) / 2,
+    ens_ets_arima_tslm   = (ets_auto + arima_log + tslm_log) / 3
+  ) |>
+  select(vertical, starts_with("ens_"))
+```
+
+### Results: Dynamic Models vs. ARIMA and Baselines
+
+```{r dynamic-results}
+fc_dynamic <- bind_rows(
+  fits_arimax   |> forecast(new_data = test_data),
+  fits_dhr      |> forecast(new_data = test_data),
+  fits_ensemble |> forecast(new_data = test_data)
+)
+
+dynamic_terms <- bind_rows(tidy(fits_arimax), tidy(fits_dhr)) |>
+  filter(str_detect(term, "^(ar|ma|sar|sma)[0-9]")) |>
+  count(vertical, .model, name = "dof")
+
+dynamic_lb <- augment(fits_arimax) |>
+  bind_rows(augment(fits_dhr)) |>
+  as_tibble() |>
+  filter(!is.na(.innov)) |>
+  left_join(dynamic_terms, by = c("vertical", ".model")) |>
+  mutate(dof = replace_na(dof, 0L)) |>
+  group_by(vertical, .model) |>
+  summarise(lb_pvalue = Box.test(.innov, lag = 24, type = "Ljung-Box", fitdf = first(dof))$p.value,
+            .groups = "drop")
+
+dynamic_accuracy <- accuracy(fc_dynamic, retail_ts) |>
+  select(vertical, .model, RMSE, MAE, MAPE, MASE)
+
+comparison <- bind_rows(
+  dynamic_accuracy |> mutate(Family = case_when(
+    str_starts(.model, "arimax") ~ "ARIMAX",
+    str_starts(.model, "dhr")    ~ "Fourier (DHR)",
+    TRUE                         ~ "Ensemble")),
+  arima_accuracy |> semi_join(arima_selected, by = c("vertical", ".model")) |> mutate(Family = "Seasonal ARIMA"),
+  baseline_accuracy |> filter(.model %in% c("snaive", "drift")) |> mutate(Family = "Baseline")
+) |>
+  left_join(bind_rows(dynamic_lb, arima_lb), by = c("vertical", ".model")) |>
+  arrange(vertical, RMSE)
+
+# helpers for inline numbers in the interpretation text
+rmse_of <- function(v, m) scales::comma(comparison$RMSE[comparison$vertical == v & comparison$.model == m], accuracy = 1)
+mape_of <- function(v, m) round(comparison$MAPE[comparison$vertical == v & comparison$.model == m], 1)
+lbp_of  <- function(v, m) round(comparison$lb_pvalue[comparison$vertical == v & comparison$.model == m], 2)
+
+comparison |>
+  select(vertical, Family, .model, RMSE, MAE, MAPE, MASE, lb_pvalue) |>
+  knitr::kable(digits = c(0, 0, 0, 1, 1, 2, 3, 3),
+               caption = "2024-2026 test accuracy: ARIMAX, Fourier, and ensemble models vs. selected ARIMA and baselines (sorted by RMSE). Ljung-Box p (lag 24) shown for single ARIMA-type models; CPI models use actual CPI (ex-post).")
+```
+
+```{r dynamic-forecast-plot, fig.height=10}
+dynamic_best <- comparison |>
+  filter(Family %in% c("ARIMAX", "Fourier (DHR)", "Ensemble"), .model != "arimax_td_cpi") |>
+  group_by(vertical) |>
+  slice_min(RMSE, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+fc_dynamic |>
+  semi_join(dynamic_best, by = c("vertical", ".model")) |>
+  autoplot(retail_ts |> filter(Month >= yearmonth("2019 Jan")), level = NULL) +
+  facet_wrap(vars(vertical), scales = "free_y", ncol = 1) +
+  scale_y_continuous(labels = dollar_format(suffix = "M")) +
+  labs(title = "Best non-CPI dynamic or ensemble model per series vs. actual sales",
+       subtitle = "Test period Jan 2024 - Aug 2026 (black: actual sales)",
+       y = "Monthly sales (USD millions)", x = NULL, colour = "Model") +
+  theme(legend.position = "top")
+```
+
+**Interpretation.**
+
+- **Trading days fix the residuals.** Adding weekday counts removes the leftover autocorrelation from univariate ARIMA: `arimax_td` passes the Ljung-Box test for every series (p = `r lbp_of("building", "arimax_td")`, `r lbp_of("clothing", "arimax_td")`, `r lbp_of("health", "arimax_td")`, and `r lbp_of("macro_retail", "arimax_td")` for Building, Clothing, Health, and Macro). Test accuracy is mixed on its own: it improves on univariate ARIMA for Clothing and Health but not for Building and Macro. Its main value is a statistically sound error model and more trustworthy prediction intervals.
+- **CPI helps defensive spending but not discretionary spending.** With actual CPI, `arimax_td_cpi` is the most accurate model for Health (RMSE `r rmse_of("health", "arimax_td_cpi")`) and the Macro total (`r rmse_of("macro_retail", "arimax_td_cpi")`), but it fails badly for Clothing (MAPE `r mape_of("clothing", "arimax_td_cpi")`%), whose sales did not keep pace with prices in 2024-2026. Because these runs use known future CPI, they are an upper bound; a live forecast would also need a CPI forecast.
+- **Fourier terms need the full seasonal shape.** AICc selects $K = 6$ for Clothing, Health, and Macro and $K = 5$ for Building, so retail seasonality is too sharp (December peaks) for a few smooth harmonics. Dynamic harmonic regression beats univariate ARIMA for Building, Clothing, and Macro, but its residuals still fail the Ljung-Box test, so seasonal differencing remains the better error structure here.
+- **Ensembles are the most reliable choice.** Among models that do not need future CPI, a simple average is the most accurate in every series: ETS + ARIMAX for Clothing (RMSE `r rmse_of("clothing", "ens_ets_arimax")`), Health (`r rmse_of("health", "ens_ets_arimax")`), and Macro (`r rmse_of("macro_retail", "ens_ets_arimax")`), and ETS + ARIMA + TSLM for Building (`r rmse_of("building", "ens_ets_arima_tslm")`); both ETS-based ensembles beat seasonal naive on Building, which no single ARIMA-type model managed. This matches the M-competition finding that combining forecasts from different model families improves accuracy (Makridakis et al., 2022).
+
+**Recommendation for the presentation:** use the ETS + ARIMAX (trading days) ensemble as the main forecast for Clothing, Health, and Macro, and the three-model ensemble for Building, then confirm the ranking with the team's rolling-origin cross-validation before finalizing. For Building, the automatic multiplicative ETS in the ETS section is also strong on its own and should be compared in that cross-validation.
 
 ------------------------------------------------------------------------
 

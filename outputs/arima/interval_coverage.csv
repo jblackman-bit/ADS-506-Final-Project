@@ -1,5 +1,0 @@
-vertical,.model,cover95,cover80,mean_pct_error
-building,arima_tradingday,0.96875,0.84375,-7.875732272558254
-clothing,arima_tradingday,1,1,-1.001140384669934
-health,arima_tradingday,0.96875,0.875,-1.0121309923024115
-macro_retail,arima_tradingday,1,0.96875,-2.8780445763411007

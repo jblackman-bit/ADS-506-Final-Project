@@ -94,13 +94,16 @@ Based on our team agreements and the project tracking matrix, the workflow is pa
 | **1. Data Ingestion & Pipeline** | `ads506_retail_sales_analysis.Rmd` (Sec 2) | Automated FRED download via curl, CPI deflation, imputation check, unified `tsibble` table export | **Jordan** | Completed |
 | **2. Exploratory Data Analysis (EDA)** | `ads506_retail_sales_analysis.Rmd` (Sec 3) | `feasts` (STL Loess, `gg_season`, `gg_subseries`, ACF/PACF diagnostics) | **Jordan** | Completed |
 | **3. Baseline Benchmark Forecasters** | `ads506_retail_sales_analysis.Rmd` (Sec 4.1) | `fable` (Seasonal Naïve, Drift, Mean) with RMSE, MAE, MAPE, MASE | **Mia** | Completed |
-| **4. Exponential Smoothing (ETS)** | `ads506_retail_sales_analysis.Rmd` (Sec 4.2) | `fable::ETS()` state-space models (additive vs multiplicative seasonal structures) | **Mia** | Scaffolded |
-| **5. Time Series Regression (TSLM)** | `ads506_retail_sales_analysis.Rmd` (Sec 4.3) | `fable::TSLM()` deterministic trend + monthly seasonal dummies + macro predictors | **Team** | Scaffolded |
-| **6. ARIMA & Seasonal ARIMA** | `ads506_retail_sales_analysis.Rmd` (Sec 4.4) | `fable::ARIMA()`, KPSS unit-root tests, differencing, Box-Jenkins diagnostic loop | **Ramin** | Scaffolded |
-| **7. Advanced & Dynamic Regression** | `ads506_retail_sales_analysis.Rmd` (Sec 4.5) | Dynamic harmonic regression (Fourier), ARIMAX with FRED macro predictors, ensembles | **Team** | Scaffolded |
-| **8. Interactive Shiny Dashboard** | `app.R` | `shiny`, `bslib`, `fpp3`, `ggplot2`, scenario exploration & forecast viewer | **Jordan** | Completed |
-| **9. Executive Data Story (Deliverable 1)** | Slide Deck & MP4 Video Presentation | 8–10 minute executive presentation (Context-Conflict-Resolution), non-technical visuals | **All** | Upcoming (Mod 6) |
-| **10. Technical Written Report (Deliverable 2)** | Final PDF / Quarto Document | 10–15 page formal paper in APA 7 format | **All** | Upcoming (Mod 7) |
+| **4. Exponential Smoothing (ETS)** | `ads506_retail_sales_analysis.Rmd` (Sec 4.2) | `fable::ETS()` state-space models (additive vs multiplicative seasonal structures) | **Mia** | Completed |
+| **5. Time Series Regression (TSLM)** | `ads506_retail_sales_analysis.Rmd` (Sec 4.3) | `fable::TSLM()` deterministic trend + monthly seasonal dummies + CPI price elasticity + COVID intervention | **Mia & Jordan** | Completed |
+| **6. ARIMA & Seasonal ARIMA** | `ads506_retail_sales_analysis.Rmd` (Sec 4.4) | `fable::ARIMA()`, KPSS unit-root tests, differencing, Box-Jenkins diagnostic loop | **Ramin** | Completed |
+| **7. Dynamic Regression & Ensembles** | `ads506_retail_sales_analysis.Rmd` (Sec 4.5) | Dynamic harmonic regression (Fourier), ARIMAX with trading days & COVID dummy, multi-model forecast ensembles | **Ramin** | Completed |
+| **8. COVID Outliers & Intervention Analysis** | `ads506_retail_sales_analysis.Rmd` (Sec 5.6) | Outlier evaluation (Raw vs. Intervention Dummy vs. Imputation, FPP3 Ch. 13.9) | **Jordan** | Completed |
+| **9. Rolling-Origin Cross-Validation (TSCV)** | `ads506_retail_sales_analysis.Rmd` (Sec 5.7) | Rolling-origin cross-validation (`stretch_tsibble()`), horizon error progression, champion model selection | **Jordan** | Completed |
+| **10. Production 2026–2028 Forecasts** | `ads506_retail_sales_analysis.Rmd` (Sec 5.7) | Refit on full 1992–2026 dataset, 24-month horizon projection with 80% & 95% PIs, annual volume table | **Jordan** | Completed |
+| **11. Interactive Shiny Dashboard** | `app.R` | `shiny`, `bslib`, `fpp3`, `ggplot2`, scenario exploration & forecast viewer | **Jordan** | Completed |
+| **12. Executive Data Story (Deliverable 1)** | Slide Deck & MP4 Video Presentation | 8–10 minute executive presentation (Context-Conflict-Resolution), non-technical visuals | **All** | Upcoming (Mod 6) |
+| **13. Technical Written Report (Deliverable 2)** | Final PDF / Quarto Document | Formal paper in APA 7 format | **All** | Upcoming (Mod 7) |
 
 ------------------------------------------------------------------------
 

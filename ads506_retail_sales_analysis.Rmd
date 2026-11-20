@@ -1544,16 +1544,46 @@ champion_specs <- tibble(
   champion_model = c("ens_ets_arima_tslm", "ens_ets_arimax", "arimax_td", "ens_ets_arimax")
 )
 
-# Generate 24-month ahead forecasts and extract prediction intervals
+# Extract analytical point forecasts from the refitted models
 fc_production <- production_fits |>
   forecast(new_data = future_new_data)
 
-fc_intervals <- fc_production |>
-  hilo(level = c(80, 95)) |>
-  unpack_hilo(c(`80%`, `95%`)) |>
+point_fc <- fc_production |>
   as_tibble() |>
   inner_join(champion_specs, by = "vertical") |>
-  filter(.model == champion_model)
+  filter(.model == champion_model) |>
+  select(vertical, champion_model, Month, .mean)
+
+# Simulate 1,000 joint sample paths for each constituent model to construct ensemble prediction intervals
+# (Analytical convolution is mathematically intractable across transformed log-ARIMA and multiplicative ETS)
+set.seed(506)
+sim_paths <- production_fits |>
+  select(vertical, ets_auto, arima_auto, arimax_td, tslm_log) |>
+  generate(new_data = future_new_data, times = 1000) |>
+  as_tibble() |>
+  select(vertical, .model, Month, .rep, .sim) |>
+  pivot_wider(names_from = .model, values_from = .sim) |>
+  mutate(
+    ens_ets_arimax     = (ets_auto + arimax_td) / 2,
+    ens_ets_arima_tslm = (ets_auto + arima_auto + tslm_log) / 3
+  )
+
+sim_intervals <- sim_paths |>
+  pivot_longer(cols = c(ets_auto, arima_auto, arimax_td, tslm_log, ens_ets_arimax, ens_ets_arima_tslm),
+               names_to = ".model", values_to = "sim_val") |>
+  inner_join(champion_specs, by = "vertical") |>
+  filter(.model == champion_model) |>
+  group_by(vertical, champion_model, Month) |>
+  summarise(
+    `80%_lower` = quantile(sim_val, 0.10, na.rm = TRUE),
+    `80%_upper` = quantile(sim_val, 0.90, na.rm = TRUE),
+    `95%_lower` = quantile(sim_val, 0.025, na.rm = TRUE),
+    `95%_upper` = quantile(sim_val, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fc_intervals <- point_fc |>
+  left_join(sim_intervals, by = c("vertical", "champion_model", "Month"))
 
 # Plot historical trajectory + 24-month champion forecast envelope
 ggplot() +
@@ -1566,7 +1596,7 @@ ggplot() +
   scale_y_continuous(labels = dollar_format(suffix = "M")) +
   scale_colour_manual(values = c("Historical Actuals" = "black", "Champion Forecast Projection" = "#2b6cb0"), name = NULL) +
   labs(title = "U.S. Retail Sales Production Forecasts Through August 2028",
-       subtitle = "Refit on complete 1992-2026 dataset; shaded ribbons depict 80% and 95% prediction intervals",
+       subtitle = "Refit on complete 1992-2026 dataset; shaded ribbons depict 80% and 95% simulated prediction intervals (1,000 sample paths)",
        y = "Monthly Sales (USD Millions)", x = NULL) +
   theme(legend.position = "top")
 ```

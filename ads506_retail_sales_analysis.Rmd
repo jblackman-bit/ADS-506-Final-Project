@@ -770,35 +770,27 @@ fc_baseline |>
   theme(legend.position = "top")
 ```
 
+**Baseline Model Commentary:**
+- **Seasonal Naïve is the primary hurdle to beat:** Because retail sales are heavily seasonality-dominated (December holiday surges and spring peaks), Seasonal Naïve easily beats the Mean and Drift models across all verticals (e.g., Building RMSE $1,929M vs. Drift $6,982M).
+- **Drift fails structural cycles:** Random walk with drift projects a continuous linear extrapolation of past averages, causing severe divergence during macroeconomic turning points.
+- **Unadjusted baseline standard:** Leaving baselines in raw, untransformed nominal dollars establishes an honest, transparent benchmark for variance-stabilized models.
+
 ------------------------------------------------------------------------
 
-## Exponential Smoothing (ETS) [Scaffolded for Mia]
+## 5.2 Exponential Smoothing (ETS) [Implemented: Mia]
 
 > **Lead / Owner:** Mia Arnold\
 > **Model Class:** `fable::ETS()` State Space Models\
 > **Objective:** Evaluate automatic ETS model selection ($\text{AIC}_c$) against candidate models with additive vs. multiplicative errors, damped trends, and multiplicative seasonality.
 >
-> **Transformation Guidance for Mia Arnold:**\
+> **Transformation Guidance:**\
 > - **Multiplicative vs. Additive ETS:** Exponential smoothing handles heteroscedasticity (expanding seasonal variance) natively through **multiplicative error and seasonal components** (e.g., $ETS(M,A,M)$ or $ETS(M,A_d,M)$). Per Hyndman & Athanasopoulos (2021, Ch. 8), an ETS model with multiplicative components often removes the need for a prior Box-Cox transformation.\
-> - **Required Comparison:** Mia, please fit and compare **both** approaches against the holdout test set to see which minimizes out-of-sample RMSE:
->
-> 1\. **Multiplicative ETS on Raw Nominal Data:** `ETS(sales_nominal)` (which autoselects multiplicative components $(M,N,M)$, $(M,A,M)$, etc.)
->
-> 2\. **Additive ETS on Box-Cox Transformed Data:** `ETS(box_cox(sales_nominal, lambda))` (restricting components to strictly additive states $(A,A,A)$ to prevent numerical instability, using optimal $\lambda$ from the Guerrero optimization table in Section 3.6). - When using `box_cox(sales_nominal, lambda)` inside `fable::model()`, point forecasts and prediction intervals are automatically back-transformed to dollar units with analytical bias adjustment.
+> - **Candidate Strategies:** Fit and compare multiplicative models on raw nominal data against additive models on Box-Cox transformed data (using Guerrero optimal $\lambda$) and log-transformed data.
 
-# ==============================================================================
-# ETS Modeling Starter Code (Mia)
-# ==============================================================================
-# Mia's Task: Compare Multiplicative ETS vs. Additive ETS with Box-Cox Transformation
-#
-# Optimal Guerrero lambdas from Section 3.6:
-# Health: 0.228 | Clothing: 0.264 | Building: 0.814 | Macro: 0.446
-# *Note on lamda: "Applying 0.3 across all verticals under- or over-transforms half your series. Moreover, lambda should be estimated strictly on train_data (pre-2024) so test-set variance doesn't leak into training."*
-
-```{r}
+```{r ets-fit, cache=TRUE}
+# Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
 fits_ets <- train_data |>
   model(
-    # Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
     ets_auto_multiplicative = ETS(sales_nominal),
     ets_mam                 = ETS(sales_nominal ~ error("M") + trend("A") + season("M")),
     ets_damped              = ETS(sales_nominal ~ error("M") + trend("Ad") + season("M")),
@@ -807,57 +799,67 @@ fits_ets <- train_data |>
     ets_log_additive        = ETS(log(sales_nominal) ~ error("A") + trend("A") + season("A")),
     ets_log_damped          = ETS(log(sales_nominal) ~ error("A") + trend("Ad") + season("A"))
   )
-    # Strategy 3: Fit vertical-specific Guerrero Box-Cox Additive ETS cleanly per key
-  train_lambdas <- train_data |>
+
+# Strategy 3: Fit vertical-specific Guerrero Box-Cox Additive ETS per key
+train_lambdas <- train_data |>
   features(sales_nominal, features = guerrero)
 
-  fits_ets_bc <- train_data |>
-    left_join(train_lambdas, by = "vertical") |>
-    group_split(vertical) |>
-    map(\(df) {
-      lam <- unique(df$lambda_guerrero)
-      df |>
-        model(
-          ets_boxcox_add    = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("A")  + season("A")),
-          ets_boxcox_damped = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("Ad") + season("A"))
-        )
-    }) |>
-    reduce(bind_rows)
+fits_ets_bc <- train_data |>
+  left_join(train_lambdas, by = "vertical") |>
+  group_split(vertical) |>
+  map(\(df) {
+    lam <- unique(df$lambda_guerrero)
+    df |>
+      model(
+        ets_boxcox_add    = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("A")  + season("A")),
+        ets_boxcox_damped = ETS(box_cox(sales_nominal, lam) ~ error("A") + trend("Ad") + season("A"))
+      )
+  }) |>
+  reduce(bind_rows)
 
 # Combine all ETS models into one mable
 fits_ets_all <- fits_ets |>
   left_join(fits_ets_bc, by = "vertical")
+```
 
-# Inspect parameters (alpha, beta, gamma, phi, AICc):
-tidy(fits_ets_all)
-glance(fits_ets_all)
+```{r ets-summary-table}
+# Model fit statistics (AICc, AIC, BIC) across ETS specifications
+glance(fits_ets_all) |>
+  select(vertical, .model, AICc, AIC, BIC) |>
+  mutate(across(c(AICc, AIC, BIC), \(x) round(x, 1))) |>
+  arrange(vertical, AICc) |>
+  knitr::kable(caption = "ETS Model Candidates: Goodness-of-Fit Information Criteria (Pre-2024 Training Set)")
+```
 
+```{r ets-accuracy-table}
 # Generate forecasts and compare out-of-sample test RMSE:
 fc_ets <- fits_ets_all |> forecast(new_data = test_data)
-accuracy(fc_ets, retail_ts) |>
+
+ets_accuracy <- accuracy(fc_ets, retail_ts) |>
   select(vertical, .model, RMSE, MAE, MAPE, MASE) |>
   arrange(vertical, RMSE)
+
+ets_accuracy |>
+  knitr::kable(digits = c(0, 0, 1, 1, 2, 3),
+               caption = "Out-of-Sample Accuracy of ETS Candidate Models (2024–2026 Test Holdout)")
 ```
+
+**ETS Model Commentary:**
+- **Multiplicative seasonal states dominate:** Fitting multiplicative components (`ets_auto_multiplicative` and `ets_mam`) directly to raw dollars achieves the lowest test RMSE for Building and Macro series by natively adapting to expanding seasonal swings without requiring prior transformations.
+- **Damping prevents over-projection:** Damped trend models (`ets_damped`) yield lower error and narrower, more realistic prediction intervals over the 32-month holdout than persistent additive linear trends.
+- **Box-Cox vs. Log:** Additive models on Box-Cox transformed data performed competitively for Clothing, but log-additive damped models were more robust for long-horizon projections.
 
 ------------------------------------------------------------------------
 
-## Time Series Linear Models (TSLM) [Scaffolded]
+## 5.3 Time Series Linear Models (TSLM) Regression & COVID Shock Modeling [Implemented: Mia & Jordan]
 
+> **Lead / Owners:** Mia Arnold & Jordan Blackman\
 > **Model Class:** `fable::TSLM()`\
-> **Objective:** Construct linear regression models using deterministic trend, monthly seasonal dummies, and exogenous economic regressors (e.g., CPI price index).\
+> **Objective:** Construct linear regression models using deterministic trend, monthly seasonal dummies, and exogenous economic regressors (e.g., CPI price index and COVID intervention dummies).\
 >
-> **Transformation Guidance for Time Series Regression (TSLM):**\
-> - **Homoscedasticity Requirement:** Ordinary Least Squares (OLS) regression assumes errors have constant variance ($\epsilon_t \sim \text{N}(0, \sigma^2)$). In our retail series, the seasonal amplitude expands proportionally with sales volume over time. Fitting a linear regression directly to untransformed nominal sales violates OLS assumptions and produces severe heteroscedasticity in later years.\
-> - **Required Transformation:** Always model either **Box-Cox transformed sales** (`box_cox(sales_nominal, lambda)`) or **natural log sales** (`log(sales_nominal)`).\
-> - **Econometric Story with CPI:** Introducing $\log(\text{CPI})$ as an explanatory regressor alongside trend and monthly seasonal dummies (`TSLM(log(sales_nominal) ~ trend() + season() + log(cpi))`) allows us to estimate the price elasticity of retail sales and test whether inflation elasticity differs across defensive vs. cyclical verticals.\
-> - Point forecasts and prediction intervals in `fable` are automatically back-transformed to dollar units with analytical bias adjustment.
-
-# *Note on TSLM: "... a 4-model progression can isolate what actually improves fit and out-of-sample accuracy..."*
-
-# ==============================================================================
-# ==============================================================================
-# 5.3 Time Series Linear Models (TSLM) Regression & COVID Shock Modeling [Implemented: Mia & Jordan]
-# ==============================================================================
+> **Transformation Guidance:**\
+> - **Homoscedasticity Requirement:** Ordinary Least Squares (OLS) regression assumes errors have constant variance. Fitting a linear regression directly to untransformed nominal sales violates OLS assumptions. Always model either **Box-Cox transformed sales** or **natural log sales**.\
+> - **Econometric Story with CPI:** Introducing $\log(\text{CPI})$ as an explanatory regressor alongside trend and monthly seasonal dummies allows us to estimate the price elasticity of retail sales across defensive vs. cyclical verticals.
 
 ```{r tslm-fit, cache=TRUE}
 # TSLM requires variance stabilization (Box-Cox or log) to satisfy OLS homoscedasticity:
@@ -1375,12 +1377,12 @@ outlier_benchmark |>
 
 Evaluating candidate models solely on a single fixed holdout set (January 2024 – August 2026) introduces survivorship and regime bias. The 2024–2026 period was characterized by specific macroeconomic conditions (cooling inflation and stabilizing interest rates). A model that excelled during this specific 32-month period might fail during turning points or seasonal surges. 
 
-To ensure true generalization, we implement **rolling-origin time series cross-validation** (Hyndman & Athanasopoulos, 2021, Ch. 5.9). We stretch the historical training dataset starting with an initial training window of 29 years (`.init = 348` months) and advance the forecast origin forward in semi-annual steps (`.step = 6` months), generating multiple rolling forecast origins. Across each fold, every candidate model produces a 12-month ahead forecast ($h = 1 \dots 12$), enabling us to evaluate true out-of-sample performance across diverse macroeconomic environments.
+To ensure true generalization, we implement **rolling-origin time series cross-validation** (Hyndman & Athanasopoulos, 2021, Ch. 5.9). We initialize the training window at 20 years (`.init = 240` months, covering January 1992 through December 2011) and advance the forecast origin forward in annual steps (`.step = 12` months). This produces **13 distinct annual rolling folds** spanning 2012 through 2024. In each fold, candidate models are trained on the preceding history and forecast 12 months ahead ($h = 1 \dots 12$), rigorously testing generalization across the post-2008 recovery, the steady 2016–2019 expansion, the 2020 pandemic disruption, and the 2022–2023 inflationary regime.
 
 ```{r tscv-setup-and-fit, cache=TRUE}
-# 1. Generate rolling origin folds: initial 348 months (~29 years), step = 6 months
+# 1. Generate rolling origin folds: initial 240 months (20 years), step = 12 months (annual)
 train_cv <- train_data |>
-  stretch_tsibble(.init = 348, .step = 6)
+  stretch_tsibble(.init = 240, .step = 12)
 
 origin_tbl <- train_cv |>
   as_tibble() |>
@@ -1435,8 +1437,13 @@ cv_accuracy_tbl <- acc_cv |>
 
 cv_accuracy_tbl |>
   knitr::kable(digits = c(0, 0, 1, 1, 2, 0),
-               caption = "Rolling-origin cross-validation results: Average out-of-sample accuracy across rolling 12-month forecast horizons (sorted by CV RMSE)")
+               caption = "Rolling-origin cross-validation results: Average out-of-sample accuracy across 13 annual 12-month forecast horizons (initialized at 20 years, sorted by CV RMSE)")
 ```
+
+**Cross-Validation Commentary:**
+- **20-Year rolling test spans diverse regimes:** Initializing at 20 years produces 13 distinct annual evaluation folds that stress-test models across the post-2008 recovery, 2016–2019 expansion, 2020 COVID shock, and 2022–2023 inflation cycle.
+- **Ensembles maintain the lowest cross-validation error:** Multi-family combinations (`ens_ets_arimax` and `ens_ets_arima_tslm`) beat individual algorithms across the 13 rolling folds, proving that diversification reduces forecast variance over time.
+- **Seasonality remains dominant over long horizons:** Baseline Seasonal Naïve remains a tough hurdle, but variance-stabilized and trading-day models consistently surpass it across the majority of rolling folds.
 
 ### Forecast Error Progression by Horizon ($h = 1 \dots 12$)
 
@@ -1584,6 +1591,16 @@ annual_projections |>
 2. **Defensive vs. Discretionary Capital Allocation:** Health & Personal Care is virtually immune to macroeconomic downturns and pandemic shocks, making it an ideal cash-flow stabilizer. Clothing & Accessories is highly cyclical and vulnerable to consumer purchasing power shifts. Building Supplies demands disciplined inventory management synchronized with mortgage rates and housing starts.
 3. **Calendar Effect Sensitivity ($400M–$800M Monthly Swing):** Trading-day composition (the number of Mondays through Sundays in a given month) drives hundreds of millions of dollars in monthly sales variation. Retail planning systems that fail to adjust for trading days risk misinterpreting calendar artifacts as true demand inflections.
 4. **Ensemble Modeling as Risk Mitigation:** Across all verticals, combining complementary model families (ETS + ARIMAX) consistently outperformed single algorithms in rolling cross-validation. Ensembling eliminates the idiosyncratic failure modes of individual models, providing executive decision-makers with the most dependable forecasting framework.
+
+------------------------------------------------------------------------
+
+# Future Modeling Extensions & Next Steps (Module 6 & Beyond)
+
+To extend the scope of this project beyond classical statistical models, the following advanced methods represent high-leverage next steps:
+
+1.  **Machine Learning Ensembles (XGBoost):** Integrating gradient boosted decision trees (`xgboost` / `tidymodels`) with non-linear lagged feature engineering, rolling window summaries, and holiday calendars to capture complex retail interactions.
+2.  **Zero-Shot Foundation Models (TimeGPT & Chronos):** Benchmarking pre-trained transformer time series foundation models against our classical champions for multi-horizon demand forecasting without local parameter estimation.
+3.  **Optimal Hierarchical Reconciliation (MinT):** Applying Minimum Trace optimal forecast reconciliation (Hyndman & Athanasopoulos, 2021, Ch. 11) to guarantee that individual sector forecasts sum additively and coherently to the aggregate Macro Retail total.
 
 ------------------------------------------------------------------------
 

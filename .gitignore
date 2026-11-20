@@ -17,6 +17,11 @@ Rplots.pdf
 
 # RStudio files
 .Rproj.user/
+*.Rproj
+
+# Knitr cache and figure output
+*_cache/
+*_files/
 
 # macOS files
 .DS_Store

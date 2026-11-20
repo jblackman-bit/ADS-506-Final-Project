@@ -1601,23 +1601,56 @@ ggplot() +
   theme(legend.position = "top")
 ```
 
-### Annual Projected Retail Sales Projections (2026–2028)
+### Annual Projected Retail Sales Projections (2025–2027)
 
-To support executive budgeting and strategic inventory purchasing, the table below converts the monthly model predictions into annual aggregate volume projections:
+To support executive budgeting and strategic inventory purchasing, the table below synthesizes realized historical actuals with out-of-sample model projections.
+
+> **Important Horizon Note on 2026:** Because the historical FRED dataset utilized in this project extends through **August 2026** (416 historical observations), the year 2026 is presented as a **transparent blended projection**:
+> - **Realized Historical Actuals (Jan–Aug 2026, 8 months):** Reflects known consumer expenditure reported by the U.S. Census Bureau.
+> - **Champion Model Forecast (Sep–Dec 2026, 4 months):** Projects the critical Q4 holiday retail surge.
+> - **2026 Blended Total:** Combines realized YTD actuals with our Q4 forecast to provide a complete 12-month calendar estimate.
+> - **2027 Full-Year Forecast:** Represents the first 100% forward-looking, out-of-sample projection year.
 
 ```{r annual-projections-table}
-annual_projections <- bind_rows(
-  retail_ts |> as_tibble() |> select(vertical, Month, sales = sales_nominal) |> mutate(Type = "Actual"),
-  fc_intervals |> select(vertical, Month, sales = .mean) |> mutate(Type = "Forecast")
-) |>
-  mutate(Year = year(Month)) |>
-  filter(Year %in% c(2025, 2026, 2027)) |>
-  group_by(vertical, Year) |>
-  summarise(Annual_Sales_Billions = round(sum(sales) / 1000, 2), .groups = "drop") |>
-  pivot_wider(names_from = Year, values_from = Annual_Sales_Billions, names_prefix = "Year_")
+# 1. Realized full-year 2025 actuals
+act_2025 <- retail_ts |>
+  as_tibble() |>
+  filter(year(Month) == 2025) |>
+  group_by(vertical) |>
+  summarise(`2025 Actuals` = round(sum(sales_nominal) / 1000, 2))
+
+# 2. Realized 2026 YTD actuals (Jan - Aug, 8 months)
+act_2026_8m <- retail_ts |>
+  as_tibble() |>
+  filter(year(Month) == 2026) |>
+  group_by(vertical) |>
+  summarise(`2026 YTD Actuals (Jan-Aug)` = round(sum(sales_nominal) / 1000, 2))
+
+# 3. Model Q4 2026 forecast (Sep - Dec, 4 months)
+fc_2026_4m <- fc_intervals |>
+  filter(year(Month) == 2026) |>
+  group_by(vertical) |>
+  summarise(`2026 Q4 Forecast (Sep-Dec)` = round(sum(.mean) / 1000, 2))
+
+# 4. Model full-year 2027 forecast (Jan - Dec, 12 months)
+fc_2027_12m <- fc_intervals |>
+  filter(year(Month) == 2027) |>
+  group_by(vertical) |>
+  summarise(`2027 Full-Year Forecast` = round(sum(.mean) / 1000, 2))
+
+# 5. Synthesize blended annual table with YoY growth trajectories
+annual_projections <- act_2025 |>
+  left_join(act_2026_8m, by = "vertical") |>
+  left_join(fc_2026_4m, by = "vertical") |>
+  mutate(`2026 Blended Total` = round(`2026 YTD Actuals (Jan-Aug)` + `2026 Q4 Forecast (Sep-Dec)`, 2)) |>
+  left_join(fc_2027_12m, by = "vertical") |>
+  mutate(
+    `2026 YoY Growth` = scales::percent((`2026 Blended Total` / `2025 Actuals`) - 1, accuracy = 0.1),
+    `2027 YoY Growth` = scales::percent((`2027 Full-Year Forecast` / `2026 Blended Total`) - 1, accuracy = 0.1)
+  )
 
 annual_projections |>
-  knitr::kable(caption = "Annual U.S. Retail Sales Totals (Billions USD): 2025 Actuals vs. 2026-2027 Projected Volume")
+  knitr::kable(caption = "Annual U.S. Retail Sales Projections (Billions USD): Realized 2025 Actuals vs. 2026 Blended Total and 2027 Full-Year Forecast")
 ```
 
 ---

@@ -1481,12 +1481,19 @@ ggplot(fc_errors_by_h, aes(x = h, y = RMSE, colour = .model)) +
 By synthesizing our two independent validation frameworks—the **2024–2026 Test Holdout Set** and the **Multi-Fold Rolling Cross-Validation**—we obtain an unassailable performance scorecard:
 
 ```{r master-comparison-table}
+# Compile out-of-sample test holdout accuracy across all candidate models with standardized identifiers
+test_accuracy_all <- bind_rows(
+  baseline_accuracy |> filter(.model %in% c("snaive", "drift")),
+  ets_accuracy |> filter(.model == "ets_auto_multiplicative") |> mutate(.model = "ets_auto"),
+  tslm_accuracy |> filter(.model == "tslm_log_trend_season") |> mutate(.model = "tslm_log"),
+  arima_accuracy |> filter(.model == "auto_log") |> mutate(.model = "arima_auto"),
+  dynamic_accuracy |> filter(.model %in% c("arimax_td", "ens_ets_arimax", "ens_ets_arima_tslm"))
+) |>
+  select(vertical, .model, Test_RMSE = RMSE, Test_MAE = MAE, Test_MAPE = MAPE)
+
 master_evaluation <- cv_accuracy_tbl |>
   select(vertical, .model, Family, CV_RMSE, CV_MAE, CV_MAPE) |>
-  left_join(
-    comparison |> select(vertical, .model, Test_RMSE = RMSE, Test_MAE = MAE, Test_MAPE = MAPE),
-    by = c("vertical", ".model")
-  ) |>
+  left_join(test_accuracy_all, by = c("vertical", ".model")) |>
   arrange(vertical, CV_RMSE)
 
 master_evaluation |>

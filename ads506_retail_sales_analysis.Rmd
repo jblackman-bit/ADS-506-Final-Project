@@ -704,8 +704,8 @@ To prepare for our team modeling work, we split the data into training and test 
 - **Training Set:** January 1992 through December 2023 (384 months)
 - **Test Holdout Set:** January 2024 through August 2026 (32 months out-of-sample)
 
-> **Takeaway for Group 8 (Nominal vs. Real & Role of CPI):**\
-> Starting with nominal sales for your initial baseline models is standard practice. When your team builds Time Series Regression (TSLM) in Module 4 and ARIMAX in Module 5/6, introducing CPI as an explanatory regressor gives you a strong econometric story for your presentation and technical report.
+> **Nominal vs. Real & Role of CPI:**\
+> We will use nominal sales for the initial baseline models as is standard practice. When building Time Series Regression (TSLM) in Module 4 and ARIMAX in Module 5/6, CPI will be introduced as an explanatory regressor that functions as a strong econometric.
 
 ```{r train-test-split}
 train_data <- retail_ts |> filter(Month < yearmonth("2024 Jan"))
@@ -790,7 +790,7 @@ fc_baseline |>
 > - **Candidate Strategies:** Fit and compare multiplicative models on raw nominal data against additive models on Box-Cox transformed data (using Guerrero optimal $\lambda$) and log-transformed data.
 
 ```{r ets-fit, cache=TRUE}
-# Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
+    # Strategy 1: Multiplicative components on raw nominal dollars (native variance handling)
 fits_ets <- train_data |>
   model(
     ets_auto_multiplicative = ETS(sales_nominal),
@@ -802,7 +802,7 @@ fits_ets <- train_data |>
     ets_log_damped          = ETS(log(sales_nominal) ~ error("A") + trend("Ad") + season("A"))
   )
 
-# Strategy 3: Fit vertical-specific Guerrero Box-Cox Additive ETS per key
+    # Strategy 3: Fit vertical-specific Guerrero Box-Cox Additive ETS per key
 train_lambdas <- train_data |>
   features(sales_nominal, features = guerrero)
 
@@ -819,7 +819,7 @@ fits_ets_bc <- train_data |>
   }) |>
   reduce(bind_rows)
 
-# Combine all ETS models into one mable
+    # Combine all ETS models into one mable
 fits_ets_all <- fits_ets |>
   left_join(fits_ets_bc, by = "vertical")
 ```

@@ -771,19 +771,21 @@ fc_baseline |>
 ```
 
 **Baseline Model Commentary:**
+
 - **Seasonal Naïve is the primary hurdle to beat:** Because retail sales are heavily seasonality-dominated (December holiday surges and spring peaks), Seasonal Naïve easily beats the Mean and Drift models across all verticals (e.g., Building RMSE $1,929M vs. Drift $6,982M).
 - **Drift fails structural cycles:** Random walk with drift projects a continuous linear extrapolation of past averages, causing severe divergence during macroeconomic turning points.
 - **Unadjusted baseline standard:** Leaving baselines in raw, untransformed nominal dollars establishes an honest, transparent benchmark for variance-stabilized models.
 
 ------------------------------------------------------------------------
 
-## 5.2 Exponential Smoothing (ETS) [Implemented: Mia]
+## Exponential Smoothing (ETS) [Implemented: Mia]
 
 > **Lead / Owner:** Mia Arnold\
 > **Model Class:** `fable::ETS()` State Space Models\
 > **Objective:** Evaluate automatic ETS model selection ($\text{AIC}_c$) against candidate models with additive vs. multiplicative errors, damped trends, and multiplicative seasonality.
 >
-> **Transformation Guidance:**\
+> **Transformation Guidance:**
+>
 > - **Multiplicative vs. Additive ETS:** Exponential smoothing handles heteroscedasticity (expanding seasonal variance) natively through **multiplicative error and seasonal components** (e.g., $ETS(M,A,M)$ or $ETS(M,A_d,M)$). Per Hyndman & Athanasopoulos (2021, Ch. 8), an ETS model with multiplicative components often removes the need for a prior Box-Cox transformation.\
 > - **Candidate Strategies:** Fit and compare multiplicative models on raw nominal data against additive models on Box-Cox transformed data (using Guerrero optimal $\lambda$) and log-transformed data.
 
@@ -845,19 +847,21 @@ ets_accuracy |>
 ```
 
 **ETS Model Commentary:**
+
 - **Multiplicative seasonal states dominate:** Fitting multiplicative components (`ets_auto_multiplicative` and `ets_mam`) directly to raw dollars achieves the lowest test RMSE for Building and Macro series by natively adapting to expanding seasonal swings without requiring prior transformations.
 - **Damping prevents over-projection:** Damped trend models (`ets_damped`) yield lower error and narrower, more realistic prediction intervals over the 32-month holdout than persistent additive linear trends.
 - **Box-Cox vs. Log:** Additive models on Box-Cox transformed data performed competitively for Clothing, but log-additive damped models were more robust for long-horizon projections.
 
 ------------------------------------------------------------------------
 
-## 5.3 Time Series Linear Models (TSLM) Regression & COVID Shock Modeling [Implemented: Mia & Jordan]
+## Time Series Linear Models (TSLM) Regression & COVID Shock Modeling [Implemented: Mia & Jordan]
 
 > **Lead / Owners:** Mia Arnold & Jordan Blackman\
 > **Model Class:** `fable::TSLM()`\
 > **Objective:** Construct linear regression models using deterministic trend, monthly seasonal dummies, and exogenous economic regressors (e.g., CPI price index and COVID intervention dummies).\
 >
-> **Transformation Guidance:**\
+> **Transformation Guidance:**
+>
 > - **Homoscedasticity Requirement:** Ordinary Least Squares (OLS) regression assumes errors have constant variance. Fitting a linear regression directly to untransformed nominal sales violates OLS assumptions. Always model either **Box-Cox transformed sales** or **natural log sales**.\
 > - **Econometric Story with CPI:** Introducing $\log(\text{CPI})$ as an explanatory regressor alongside trend and monthly seasonal dummies allows us to estimate the price elasticity of retail sales across defensive vs. cyclical verticals.
 
@@ -932,7 +936,8 @@ tslm_accuracy |>
                caption = "TSLM candidate models: 2024-2026 test accuracy across retail verticals")
 ```
 
-**TSLM & COVID Intervention Interpretation.**
+**TSLM & COVID Intervention Interpretation:**
+
 - **Lockdown Impact Divergence:** The empirical shock of the March–May 2020 lockdown varied dramatically by sector. Discretionary physical retail (**Clothing**) experienced a catastrophic drop of approximately $-75\%$ ($p < 0.001$), while non-discretionary retail (**Health & Personal Care**) experienced negligible contraction. **Building Materials** saw a modest initial dip followed by a persistent upward level shift as consumer spending rotated toward home improvement.
 - **Piecewise Trend & Price Elasticity:** Adding the piecewise trend knot at March 2020 prevents the linear trend from over-projecting post-pandemic growth. Incorporating $\log(\text{CPI})$ demonstrates high price elasticity in defensive spending (Health & Macro Retail) but confirms that clothing spending failed to keep pace with overall inflation in the 2024–2026 test period.
 
@@ -1305,7 +1310,7 @@ fc_dynamic |>
 
 ------------------------------------------------------------------------
 
-# 5.6 COVID-19 Structural Shock Analysis & Outlier Treatment Evaluation (FPP3 Ch. 13.9) [Implemented: Jordan]
+## COVID-19 Structural Shock Analysis & Outlier Treatment Evaluation (FPP3 Ch. 13.9) [Implemented: Jordan]
 
 > **Lead / Owner:** Jordan Blackman  
 > **Methodology:** Intervention regression (Box & Tiao), STL outlier replacement & linear interpolation (Hyndman & Athanasopoulos, 2021, Ch. 13.9), and empirical forecast comparison.  
@@ -1314,6 +1319,7 @@ fc_dynamic |>
 ### Asymmetric Sectoral Exposure to the Pandemic Shock
 
 As established in Section 4.4, the COVID-19 pandemic induced severe structural disruptions across the retail landscape. However, the nature and direction of the disruption differed fundamentally across retail sectors:
+
 1. **Clothing & Accessories (Discretionary In-Person Retail):** Experienced an unprecedented collapse during the national lockdowns of March–May 2020. Monthly sales dropped by over 80% from pre-pandemic levels (April 2020 STL remainder $z = -10.60$).
 2. **Health & Personal Care (Defensive Non-Discretionary):** Proved completely inelastic to pandemic shutdowns. Consumers prioritized prescription medications and essential personal care, resulting in zero statistically significant deviation from long-run trend.
 3. **Building & Garden Supplies (Counter-Cyclical Expansion):** Following an immediate 1-month dip in March 2020, sales surged dramatically ($z > +3.2\sigma$) as remote work drove suburban home renovations, DIY spending, and gardening.
@@ -1321,6 +1327,7 @@ As established in Section 4.4, the COVID-19 pandemic induced severe structural d
 ### Empirical Evaluation of Outlier Handling Strategies (FPP3 Ch. 13.9)
 
 A critical dilemma in time series forecasting is how to treat extreme historical outliers (Hyndman & Athanasopoulos, 2021, Ch. 13.9):
+
 - **Strategy 1 (Raw Trajectory):** Leave the historical series unadjusted. Allows models to absorb the empirical variance but risks distorting autoregressive and seasonal polynomial estimates.
 - **Strategy 2 (Econometric Intervention Dummy):** Retain all historical observations but introduce an explicit pulse indicator regressor ($I(\text{Lockdown}_t)$) during March–May 2020 to absorb the one-time shock without distorting baseline parameters.
 - **Strategy 3 (Outlier Imputation / Cleaning):** Replace the extreme lockdown observations ($|z_t| > 4$) with interpolated counterfactuals based on seasonal patterns (per FPP3 Ch. 13.9), training models on an artificially "cleaned" trajectory.
@@ -1361,13 +1368,14 @@ outlier_benchmark |>
 ```
 
 **Takeaways & Outlier Philosophy for Decision-Makers:**
+
 1. **Intervention Regressors Deliver Large Gains Without Data Falsification:** Strategy 2 (intervention dummy) reduces test RMSE from 1,284 down to 1,137 (an 11.5% improvement) and lowers MAE from 979 to 807 (a 17.6% improvement) simply by isolating the 3 lockdown months.
 2. **The Danger of Outlier Imputation:** Strategy 3 yields the lowest mathematical RMSE (733.4), but it achieves this by rewriting history. In an operational business setting, wiping out real historical shocks produces artificially tight prediction intervals, creating a dangerous false sense of certainty.
 3. **Team Decision:** For operational forecasts and executive presentation, we retain the authentic historical observations while applying **Strategy 2 (econometric intervention regressors)** within dynamic regression models to protect model parameters while preserving honest risk bounds.
 
 ------------------------------------------------------------------------
 
-# 5.7 Comprehensive Model Comparison & Rolling-Origin Cross-Validation (TSCV) [Implemented: Jordan]
+## Comprehensive Model Comparison & Rolling-Origin Cross-Validation (TSCV) [Implemented: Jordan]
 
 > **Lead / Owner:** Jordan Blackman  
 > **Methodology:** Rolling-origin time series cross-validation (`stretch_tsibble()`), multi-metric synthesis (RMSE, MAE, MAPE, MASE), error-by-horizon progression ($h = 1 \dots 12$), and 24-month production forecasting (2026–2028).  
@@ -1441,6 +1449,7 @@ cv_accuracy_tbl |>
 ```
 
 **Cross-Validation Commentary:**
+
 - **20-Year rolling test spans diverse regimes:** Initializing at 20 years produces 13 distinct annual evaluation folds that stress-test models across the post-2008 recovery, 2016–2019 expansion, 2020 COVID shock, and 2022–2023 inflation cycle.
 - **Ensembles maintain the lowest cross-validation error:** Multi-family combinations (`ens_ets_arimax` and `ens_ets_arima_tslm`) beat individual algorithms across the 13 rolling folds, proving that diversification reduces forecast variance over time.
 - **Seasonality remains dominant over long horizons:** Baseline Seasonal Naïve remains a tough hurdle, but variance-stabilized and trading-day models consistently surpass it across the majority of rolling folds.
@@ -1606,6 +1615,7 @@ ggplot() +
 To support executive budgeting and strategic inventory purchasing, the table below synthesizes realized historical actuals with out-of-sample model projections.
 
 > **Important Horizon Note on 2026:** Because the historical FRED dataset utilized in this project extends through **August 2026** (416 historical observations), the year 2026 is presented as a **transparent blended projection**:
+>
 > - **Realized Historical Actuals (Jan–Aug 2026, 8 months):** Reflects known consumer expenditure reported by the U.S. Census Bureau.
 > - **Champion Model Forecast (Sep–Dec 2026, 4 months):** Projects the critical Q4 holiday retail surge.
 > - **2026 Blended Total:** Combines realized YTD actuals with our Q4 forecast to provide a complete 12-month calendar estimate.
@@ -1655,7 +1665,7 @@ annual_projections |>
 
 ---
 
-### Executive Summary & Strategic Takeaways for Presentation (Deliverable 1)
+# Executive Summary & Strategic Takeaways for Presentation (Deliverable 1)
 
 1. **Top-Line Dollar Growth Masks Stagnant Unit Volume:** Although nominal dollar sales continue setting new records, real CPI-deflated volume has plateaued across all three retail verticals since late 2021. Retail executives should not mistake top-line growth for real organic expansion. Strategies must prioritize margin preservation and inventory turn velocity over volume growth.
 2. **Defensive vs. Discretionary Capital Allocation:** Health & Personal Care is virtually immune to macroeconomic downturns and pandemic shocks, making it an ideal cash-flow stabilizer. Clothing & Accessories is highly cyclical and vulnerable to consumer purchasing power shifts. Building Supplies demands disciplined inventory management synchronized with mortgage rates and housing starts.

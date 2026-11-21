@@ -45,10 +45,10 @@ vertical_choices <- c(
 # Benchmark scorecard summary data
 benchmark_matrix <- tibble(
   Vertical = c("Building & Garden Supplies", "Clothing & Accessories", "Health & Personal Care", "Macro Retail Composite"),
-  `Champion Specification` = c("3-Way Ensemble (ETS+ARIMA+TSLM)", "2-Way Ensemble (ETS+ARIMAX)", "ARIMAX with Trading Days", "2-Way Ensemble (ETS+ARIMAX)"),
+  `Champion Specification` = c("3-Way Ensemble (ETS+ARIMA+TSLM)", "Multiplicative ETS (M,A,M)", "ARIMAX with Trading Days", "2-Way Ensemble (ETS+ARIMAX)"),
   `Benchmark (SNAIVE)` = c("$2,756M CV / $2,153M Test", "$3,462M CV / $1,667M Test", "$1,616M CV / $4,505M Test", "$6,108M CV / $6,279M Test"),
-  `Champion Accuracy` = c("$2,023M CV / $1,804M Test", "$3,384M CV / $956M Test", "$886M CV / $1,504M Test", "$4,360M CV / $1,970M Test"),
-  `CV Error Reduction` = c("26.6%", "2.2%", "45.2%", "28.6%"),
+  `Champion Accuracy` = c("$2,023M CV / $1,804M Test", "$2,971M CV / $956M Test", "$886M CV / $1,504M Test", "$4,360M CV / $1,970M Test"),
+  `CV Error Reduction` = c("26.6%", "14.2%", "45.2%", "28.6%"),
   `Test Error Reduction` = c("16.2%", "42.6%", "66.6%", "68.6%"),
   `Status` = c("Champion Wins (Both)", "Champion Wins (Both)", "Champion Wins (Both)", "Champion Wins (Both)")
 )

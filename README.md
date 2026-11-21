@@ -173,7 +173,7 @@ To evaluate candidate models across economic regimes without survivorship bias, 
 | Retail Vertical | Designated Champion Model | Benchmark (Seasonal Naïve) | Champion Performance | CV Error Reduction | Holdout Test Error Reduction | Win Status |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|
 | **Building & Garden Supplies** | **3-Way Ensemble** (`ETS + ARIMA + TSLM`) | $2,756M CV / $2,153M Test | $2,023M CV / $1,804M Test | **-26.6%** | **-16.2%** | **Champion Wins (Both)** |
-| **Clothing & Accessories** | **2-Way Ensemble** (`ETS + ARIMAX Trading Days`) | $3,462M CV / $1,667M Test | $3,384M CV / $956M Test | **-2.2%** | **-42.6%** | **Champion Wins (Both)** |
+| **Clothing & Accessories** | **Multiplicative ETS** (`ETS(M,A,M)` / `ets_auto`) | $3,462M CV / $1,667M Test | $2,971M CV / $956M Test | **-14.2%** | **-42.6%** | **Champion Wins (Both)** |
 | **Health & Personal Care** | **ARIMAX with Trading Days** (`arimax_td`) | $1,616M CV / $4,505M Test | $886M CV / $1,504M Test | **-45.2%** | **-66.6%** | **Champion Wins (Both)** |
 | **Macro Retail Composite** | **2-Way Ensemble** (`ETS + ARIMAX`) | $6,108M CV / $6,279M Test | $4,360M CV / $1,970M Test | **-28.6%** | **-68.6%** | **Champion Wins (Both)** |
 

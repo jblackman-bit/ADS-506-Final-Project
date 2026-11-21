@@ -1313,7 +1313,7 @@ fc_dynamic |>
 ## COVID-19 Structural Shock Analysis & Outlier Treatment Evaluation (FPP3 Ch. 13.9) [Implemented: Jordan]
 
 > **Lead / Owner:** Jordan Blackman  
-> **Methodology:** Intervention regression (Box & Tiao), STL outlier replacement & linear interpolation (Hyndman & Athanasopoulos, 2021, Ch. 13.9), and empirical forecast comparison.  
+> **Methodology:** Econometric intervention regression, STL outlier replacement & linear interpolation (Hyndman & Athanasopoulos, 2021, Ch. 13.9), and empirical forecast comparison.  
 > **Objective:** Evaluate how historical macroeconomic shocks impact forecasting algorithms, compare explicit intervention modeling vs. outlier imputation, and determine the optimal outlier strategy for real-world decision-making.
 
 ### Asymmetric Sectoral Exposure to the Pandemic Shock

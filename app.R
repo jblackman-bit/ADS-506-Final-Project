@@ -184,10 +184,11 @@ server <- function(input, output, session) {
   
   # Reactive subset of data based on user controls
   selected_data <- reactive({
-    req(input$vertical_select, input$year_range)
+    req(input$vertical_select, input$year_range, input$val_type)
     retail_tsibble |>
       filter(vertical == input$vertical_select) |>
-      filter(year(Month) >= input$year_range[1] & year(Month) <= input$year_range[2])
+      filter(year(Month) >= input$year_range[1] & year(Month) <= input$year_range[2]) |>
+      mutate(sales_val = if (input$val_type == "nominal") sales_nominal else sales_real)
   })
   
   # Value Boxes
@@ -224,10 +225,9 @@ server <- function(input, output, session) {
   # Plot 1: Historical Trajectory
   output$plot_historical <- renderPlot({
     df <- selected_data()
-    y_var <- if (input$val_type == "nominal") "sales_nominal" else "sales_real"
     y_label <- if (input$val_type == "nominal") "Nominal Sales (USD Millions)" else "Real Sales (CPI Deflated, 1982-84 USD Millions)"
     
-    p <- ggplot(df, aes(x = Month, y = .data[[y_var]])) +
+    p <- ggplot(df, aes(x = Month, y = sales_val)) +
       geom_line(color = "#1B4F72", linewidth = 0.9) +
       geom_point(color = "#2874A6", size = 1.2, alpha = 0.7) +
       scale_y_continuous(labels = dollar_format(suffix = "M")) +
@@ -258,10 +258,9 @@ server <- function(input, output, session) {
   # Plot 2: STL Decomposition
   output$plot_stl <- renderPlot({
     df <- selected_data()
-    y_var <- if (input$val_type == "nominal") "sales_nominal" else "sales_real"
     
     decomp <- df |>
-      model(stl = STL(.data[[y_var]] ~ season(window = "periodic"))) |>
+      model(stl = STL(sales_val ~ season(window = "periodic"))) |>
       components()
     
     autoplot(decomp) +
@@ -281,10 +280,9 @@ server <- function(input, output, session) {
   # Plot 3: Seasonal Profile
   output$plot_seasonal <- renderPlot({
     df <- selected_data()
-    y_var <- if (input$val_type == "nominal") "sales_nominal" else "sales_real"
     
     df |>
-      gg_season(.data[[y_var]], labels = "both") +
+      gg_season(sales_val, labels = "both") +
       scale_y_continuous(labels = dollar_format(suffix = "M")) +
       labs(
         title = paste("Seasonal Pattern by Calendar Month:", names(vertical_choices)[vertical_choices == input$vertical_select]),
@@ -302,14 +300,13 @@ server <- function(input, output, session) {
   # Plot 4: Forecasts with Prediction Intervals
   output$plot_forecast <- renderPlot({
     df <- selected_data()
-    y_var <- if (input$val_type == "nominal") "sales_nominal" else "sales_real"
     h_months <- input$fc_horizon
     
     fit <- switch(
       input$fc_model,
-      "snaive" = df |> model(SNAIVE(.data[[y_var]])),
-      "ets"    = df |> model(ETS(.data[[y_var]] ~ error("M") + trend("A") + season("M"))),
-      "arima"  = df |> model(ARIMA(log(.data[[y_var]])))
+      "snaive" = df |> model(SNAIVE(sales_val)),
+      "ets"    = df |> model(ETS(sales_val ~ error("M") + trend("A") + season("M"))),
+      "arima"  = df |> model(ARIMA(log(sales_val)))
     )
     
     fc <- fit |> forecast(h = paste(h_months, "months"))
